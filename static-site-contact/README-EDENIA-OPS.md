@@ -39,6 +39,29 @@ ssh USER@HOST 'cd ~/DOMAIN/html && chmod +x install-on-server.sh && bash install
 - **`install-on-server.sh`** runs `composer install --no-dev` and creates **`~/private/smtp.config.php`** (from `DOMAIN/html`) or **`../private/smtp.config.php`** (from `public_html`).
 - Tell the customer to **edit that config file** (mailbox password, `mail_to`, etc.) or set **env vars** if you inject secrets at the panel level.
 
+## Gotchas
+
+- **File ownership.** If you run the install or edit the config as `root` (for example over SSH from NodeWorx), PHP-FPM runs as the site user and can't read the files, so the form fails. Hand them back to the account's user:
+
+  ```bash
+  chown -R ACCOUNT:ACCOUNT ~ACCOUNT/private/smtp.config.php ~ACCOUNT/DOMAIN/html/vendor
+  ```
+
+- **Phone-only forms.** `require_reply_email` is `true` by default, so a submission without a valid `email` field (or the field named in `reply_to_field`) is rejected. For forms that only ask for a phone number, set `'require_reply_email' => false` in `smtp.config.php`.
+
+## Smoke test
+
+After install and config, post a test submission. Use the site's real field names. Any non-honeypot field gets emailed.
+
+```bash
+curl -sS -X POST 'https://DOMAIN/contact.php' \
+  -H 'X-Requested-With: XMLHttpRequest' -H 'Accept: application/json' \
+  -F 'name=Test' -F 'email=test@example.com' -F 'message=Smoke test'
+# → {"ok":true,"error":""}
+```
+
+If Turnstile is configured (`turnstile_secret` or `TURNSTILE_SECRET`), this fails without a valid `cf-turnstile-response` token. Test through the browser form instead, or use Cloudflare's test keys on a staging site.
+
 ## Keeping in sync
 
 When **`contact.php`** or Composer pins change:
