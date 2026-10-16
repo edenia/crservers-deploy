@@ -74,6 +74,11 @@ on:
         type: boolean
         required: false
         default: false
+      deploy_marker:
+        description: Upload .htcrservers-deploy.json (repo, commit, time) so AI Connect can tell users the site is published from GitHub. Never served (Apache denies .ht* files).
+        type: boolean
+        required: false
+        default: true
       site_url:
         description: Optional public site URL for run summaries (pass vars.SITE_URL from caller — not sensitive)
         type: string
@@ -155,6 +160,21 @@ jobs:
         with:
           name: ${{ inputs.artifact_name }}
           path: out
+
+      - name: Write deploy marker
+        if: ${{ inputs.deploy_marker }}
+        env:
+          LOCAL_DIR: ${{ inputs.ftp_local_dir }}
+          REPOSITORY: ${{ github.repository }}
+          REF: ${{ github.ref }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          jq -n --arg repository "$REPOSITORY" --arg ref "$REF" --arg commit "$SHA" \
+            --arg deployed_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '{tool: "crservers-static-deploy", version: "v1", repository: $repository, ref: $ref, commit: $commit, deployed_at: $deployed_at}' \
+            > "${LOCAL_DIR%/}/.htcrservers-deploy.json"
+          cat "${LOCAL_DIR%/}/.htcrservers-deploy.json"
 
       - name: Check FTP secrets
         env:

@@ -415,7 +415,8 @@ Options -Indexes
 
 ## Static Deploy and AI Connect on the same site
 
-Both write to the same folder, so pick one per site:
+Both write to the same folder, so pick one per site. Each deploy uploads **`.htcrservers-deploy.json`** (repository, commit, ref, time; turn off with `deploy_marker: false`). Apache never serves `.ht*` files, so it stays private. When it's there, AI Connect tells the user that the site is published from GitHub and that changes made through the assistant will be replaced by the next deploy.
+
 
 - **AI Connect protects files changed outside it.** After a Static Deploy upload, AI Connect refuses to publish over, or undo, the files that changed (it reports a conflict instead of overwriting work it didn't make).
 - **Static Deploy overwrites whatever is in the repo**, including changes an assistant published, on the next push.
