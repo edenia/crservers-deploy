@@ -1,8 +1,19 @@
-# crservers.com — static site deploy (GitHub Actions)
+# CR Servers Static Deploy
 
-Official **crservers.com** reusable workflow for sites we host: build a static export (for example Next.js `output: "export"`) and publish over **FTP/FTPS** using [SamKirkland/FTP-Deploy-Action](https://github.com/SamKirkland/FTP-Deploy-Action).
+**CR Servers Static Deploy** publishes a website kept in GitHub to CR Servers shared hosting. A reusable GitHub Actions workflow builds a static export (for example Next.js `output: "export"`) and uploads it over **FTPS** with [SamKirkland/FTP-Deploy-Action](https://github.com/SamKirkland/FTP-Deploy-Action). The repo also holds the **contact form bundle** (`static-site-contact/`) for static sites that need to send mail.
 
-This repository is maintained by **Edenia** for the **crservers.com** hosting product. Customer application repos stay thin: they call this workflow and supply FTP secrets.
+Maintained by **Edenia** for CR Servers hosting. Customer repos stay thin: they call this workflow and supply the FTP secrets.
+
+**Which tool for which site:**
+
+| | CR Servers Static Deploy | CR Servers AI Connect |
+|---|---|---|
+| For | Developers whose site lives in a GitHub repo | Clients who update their site by asking ChatGPT or Claude |
+| How changes arrive | A push to the repo builds and uploads the site | The assistant drafts changes, shows a preview, publishes on confirmation |
+| Undo | Revert the commit and deploy again | One sentence: undo any of the last 5 publishes |
+| Server code (PHP, `.htaccess`) | Allowed (trusted repo maintainers) | Refused |
+
+Use **one of them per site** (see [Static Deploy and AI Connect on the same site](#static-deploy-and-ai-connect-on-the-same-site)). Client docs: [crservers.com/support](https://crservers.com/support).
 
 Customer repos should set **`packageManager`** in `package.json` (for example `"packageManager": "pnpm@9.15.9"`). `pnpm/action-setup` reads that field and no separate pnpm version is passed from the workflow (avoids mismatch with a pinned major in CI).
 
@@ -35,7 +46,7 @@ jobs:
 
 Configure **Settings → Secrets and variables → Actions**:
 
-- **Secrets** (required): `FTP_HOST`, `FTP_USER`, `FTP_PASSWORD`, `FTP_REMOTE_PATH`
+- **Secrets** (required): `FTP_HOST`, `FTP_USER`, `FTP_PASSWORD`, `FTP_REMOTE_PATH`. Use a **separate FTP account just for deploys**, jailed to the site folder (SiteWorx → FTP Accounts → add, with that folder as its home), not the account's main FTP login. Then `FTP_REMOTE_PATH` is `/`, and a leaked GitHub secret can only touch that folder.
 - **Variables** (optional): `SITE_URL` — public URL such as `https://dev.example.com/` (not sensitive; shown in the deploy job summary)
 
 Because this reusable workflow lives in **another** repository, the caller **cannot** use `secrets: inherit`. Map each secret under `secrets:` as shown above (same names on both sides).
@@ -308,7 +319,7 @@ Notes:
     | grep -A2 '"node_modules/basic-ftp"'
   ```
 
-## Publishing (Edenia / crservers.com)
+## Publishing (Edenia)
 
 Canonical remote:
 
@@ -323,7 +334,7 @@ cd crservers-static-deploy
 git remote add origin git@github.com:edenia/crservers-static-deploy.git   # skip if origin already set
 git branch -M main
 git add -A && git status
-git commit -am "crservers.com static site deploy reusable workflow"   # if you have local changes
+git commit -am "CR Servers Static Deploy reusable workflow"   # if you have local changes
 git push -u origin main
 git tag v1 && git push origin v1
 ```
@@ -336,7 +347,7 @@ If GitHub created a first commit (for example a default `README.md`) and `git pu
 cd crservers-static-deploy
 git init
 git add .
-git commit -m "crservers.com static site deploy reusable workflow"
+git commit -m "CR Servers Static Deploy reusable workflow"
 gh repo create edenia/crservers-static-deploy --public --source=. --remote=origin --push
 git tag v1 && git push origin v1
 ```
@@ -402,14 +413,33 @@ Options -Indexes
 </IfModule>
 ```
 
+## Static Deploy and AI Connect on the same site
+
+Both write to the same folder, so pick one per site:
+
+- **AI Connect protects files changed outside it.** After a Static Deploy upload, AI Connect refuses to publish over, or undo, the files that changed (it reports a conflict instead of overwriting work it didn't make).
+- **Static Deploy overwrites whatever is in the repo**, including changes an assistant published, on the next push.
+
+If a site moves from one to the other, say so in the repo README, and stop the deploy workflow (or remove AI Connect's access in the client area) for the tool you no longer use.
+
 ## Versioning
 
-Tag stable commits (for example `v1`, `v1.0.0`) and pin customer workflows to that tag instead of `@main`.
+Customers pin the major tag **`v1`**. To release, tag the commit (`vX.Y.Z`) and move `v1` to it, after checking that existing inputs and secrets still work (no breaking changes within a major). Current: `v1` = `v1.2.0`.
 
 ## Security
 
+- **FTPS only.** The default is `ftps`; `ftp` sends the password unencrypted, logs a warning, and will be refused in v2. Use the node hostname as `FTP_HOST` (see [FTPS hostname and certificate](#ftps-hostname-and-certificate)).
+- **A deploy-only FTP account** jailed to the site folder (see [Required repository secrets](#required-repository-secrets)).
 - Do not pass untrusted user input into `install_command`, `build_command`, or `verify_command`.
 - `clean_deploy` deletes the entire remote `FTP_REMOTE_PATH`; use only for intentional full resets.
+- **Contact bundle files:** our nodes already answer 403 for `composer.json` / `composer.lock`. As defense in depth, add this to the site's `public/.htaccess` so the rest of the bundle (setup notes, install script, `vendor/`) is never served; `contact.php` reads `vendor/` from disk, so the form keeps working:
+
+  ```apache
+  <FilesMatch "^(composer\.(json|lock)|install-on-server\.sh|smtp\.config\.example\.php|USERS-EASY-START\.md|SETUP\.md|OPERATOR\.txt)$">
+    Require all denied
+  </FilesMatch>
+  RedirectMatch 404 ^/vendor/
+  ```
 
 ## License
 
