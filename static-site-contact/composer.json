@@ -1,6 +1,7 @@
 {
   "name": "crservers/static-site-contact",
   "description": "PHPMailer dependency for contact.php (install on server next to contact.php)",
+  "license": "MIT",
   "require": {
     "php": ">=8.1",
     "ext-mbstring": "*",
