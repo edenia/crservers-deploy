@@ -424,7 +424,7 @@ If a site moves from one to the other, say so in the repo README, and stop the d
 
 ## Versioning
 
-Customers pin the major tag **`v1`**. To release, tag the commit (`vX.Y.Z`) and move `v1` to it, after checking that existing inputs and secrets still work (no breaking changes within a major). Current: `v1` = `v1.2.0`.
+Customers pin the major tag **`v1`**. To release, tag the commit (`vX.Y.Z`) and move `v1` to it, after checking that existing inputs and secrets still work (no breaking changes within a major). Current: `v1` = `v1.3.0`.
 
 ## Security
 
