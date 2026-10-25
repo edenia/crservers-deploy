@@ -1,6 +1,6 @@
 # CR Servers Static Deploy
 
-**CR Servers Static Deploy** publishes a website kept in GitHub to CR Servers shared hosting. A reusable GitHub Actions workflow builds a static export (for example Next.js `output: "export"`) and uploads it over **FTPS** with [SamKirkland/FTP-Deploy-Action](https://github.com/SamKirkland/FTP-Deploy-Action). The repo also holds the **contact form bundle** (`static-site-contact/`) for static sites that need to send mail.
+**CR Servers Static Deploy** publishes a website kept in GitHub to CR Servers shared hosting. It is also **the preferred way to deploy server code (PHP apps)** to CR Servers: see [Backend code (PHP)](#backend-code-php). A reusable GitHub Actions workflow builds a static export (for example Next.js `output: "export"`) and uploads it over **FTPS** with [SamKirkland/FTP-Deploy-Action](https://github.com/SamKirkland/FTP-Deploy-Action). The repo also holds the **contact form bundle** (`static-site-contact/`) for static sites that need to send mail.
 
 Maintained by **Edenia** for CR Servers hosting. Customer repos stay thin: they call this workflow and supply the FTP secrets.
 
@@ -11,7 +11,8 @@ Maintained by **Edenia** for CR Servers hosting. Customer repos stay thin: they 
 | For | Developers whose site lives in a GitHub repo | Clients who update their site by asking ChatGPT or Claude |
 | How changes arrive | A push to the repo builds and uploads the site | The assistant drafts changes, shows a preview, publishes on confirmation |
 | Undo | Revert the commit and deploy again | One sentence: undo any of the last 5 publishes |
-| Server code (PHP, `.htaccess`) | Allowed (trusted repo maintainers) | Refused |
+| Server code (PHP, `.htaccess`) | Allowed (trusted repo maintainers); `backend: true` adds strict checks | Refused |
+| Before upload | Blocks server-only files (config with passwords, `.env`, keys, dumps, backups), scans for secrets, checks PHP syntax and Composer advisories | Refuses server code; never shows files that may hold passwords |
 
 Use **one of them per site** (see [Static Deploy and AI Connect on the same site](#static-deploy-and-ai-connect-on-the-same-site)). Client docs: [crservers.com/support](https://crservers.com/support).
 
@@ -141,6 +142,11 @@ Available starting with the `ftp_log_level` input (not present in workflow revis
 | `dry_run` | `false` | FTP no-op |
 | `clean_deploy` | `false` | Wipes remote `FTP_REMOTE_PATH` |
 | `site_url` | *(empty)* | Pass `vars.SITE_URL` from caller for summary |
+| `backend` | `false` | Strict mode for server code: secret-scan findings and Composer advisories fail the deploy; `clean_deploy` is refused. See [Backend code (PHP)](#backend-code-php) |
+| `environment` | *(empty)* | GitHub environment for the deploy job (`production`, `staging`): required reviewers, branch rules, environment secrets |
+| `protected_paths` | *(empty)* | One glob per line, relative to `FTP_REMOTE_PATH`, never uploaded or deleted (e.g. `uploads/**`). `private/**` and `.env` files are always protected |
+| `allow_files` | *(empty)* | Exact paths (relative to `artifact_path`) the server-only file check accepts |
+| `ftp_security` | `strict` | `strict` verifies the FTPS certificate; `loose` skips it (warning) |
 
 ## New site checklist (customer repo)
 
@@ -357,6 +363,7 @@ Use a **public** repo if customer sites live in other GitHub orgs or accounts; o
 ## What runs where
 
 - **GitHub Actions:** Node runs only on the **runner** to install dependencies, run `next build`, and upload `out/` over FTP. Official actions are pinned to **v5+** / **FTP-Deploy v4.4+** so they use the **Node 24** action runtime (avoids the Node 20 deprecation on GitHub-hosted runners).
+- **Safety checks** run on the runner before the upload: see [What `backend: true` adds](#what-backend-true-adds) (they apply to every deploy).
 - **crservers (production):** Only the **static files** under your `FTP_REMOTE_PATH` are needed — typically **Apache** serves `index.html`, assets, and `.htaccess`. **You do not need Node.js on the hosting account** for this setup.
 
 ### Contact forms (SMTP mail for static sites)
@@ -413,6 +420,88 @@ Options -Indexes
 </IfModule>
 ```
 
+## Backend code (PHP)
+
+Static Deploy is the preferred way to put server code (a PHP app, an API) on CR Servers hosting. AI Connect stays static-only on purpose. Code lives in Git, every change can be reviewed, and the FTP password stays in GitHub.
+
+### Caller workflow
+
+```yaml
+name: Deploy app
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  deploy:
+    uses: edenia/crservers-static-deploy/.github/workflows/deploy-static-site.yml@v1
+    secrets:
+      FTP_HOST: ${{ secrets.FTP_HOST }}
+      FTP_USER: ${{ secrets.FTP_USER }}
+      FTP_PASSWORD: ${{ secrets.FTP_PASSWORD }}
+      FTP_REMOTE_PATH: ${{ secrets.FTP_REMOTE_PATH }}
+    with:
+      backend: true
+      environment: production
+      install_command: "composer install --no-dev --no-interaction --classmap-authoritative"
+      build_command: "mkdir -p out && cp -R public/. out/ && cp -R vendor out/"
+      skip_verify: true
+      protected_paths: |
+        uploads/**
+        logs/**
+```
+
+Adapt `install_command` and `build_command` to the app: the point is that `out/` holds exactly what the server needs, with `vendor/` built in CI so the server runs the versions that were audited. If `vendor/` sits inside the web root, block it from the web with `RedirectMatch 404 ^/vendor/` in the app's `.htaccess`; PHP still reads it from disk.
+
+### What `backend: true` adds
+
+Every deploy, static or backend, runs these checks on the build output **before** it is stored as an artifact, so blocked files never leave the runner:
+
+| Check | Static site | `backend: true` |
+|---|---|---|
+| Server-only files: `.env`, private keys, `.git` data, DB dumps, backup copies (`.bak`, `.old`, `~`), credential files, anything in `private/`, `secret(s)/`, `credentials/`, and config files (`wp-config.php`, `config.php`, `settings.php`, …) **with a password, key or token written in them** | Blocks | Blocks |
+| Secret scan ([gitleaks](https://github.com/gitleaks/gitleaks) 8.30.1, checksum-verified) | Warns (built JS often carries public API keys) | Blocks |
+| PHP syntax (`php -l`, outside `vendor/`) | Blocks | Blocks |
+| Risky PHP calls (`eval`, `exec`, `shell_exec`, `system`, includes of request input, …) | Warns for review | Warns for review |
+| Composer advisories (`composer audit` on each `composer.lock`) | Warns | Blocks |
+| `clean_deploy` | Allowed | Refused (it would delete uploads and server-only config) |
+
+Placeholder copies such as `config.example.php` or `.env.example` pass. If a finding is public by design, add its fingerprint to `.gitleaksignore` at the repo root (the annotation shows it); for a file the name check gets wrong, list it in `allow_files` and say why in the workflow.
+
+### Set up the repository
+
+1. **A deploy-only FTP account** jailed to the app folder (see [Required repository secrets](#required-repository-secrets)).
+2. **Environments** (Settings → Environments): `production` with **required reviewers** and **Deployment branches: main only**; put the four FTP secrets there as environment secrets, not repository secrets, so a branch or a workflow without the environment can't read them. Optionally `staging`, whose `FTP_REMOTE_PATH` points at a test copy of the app, deployed first.
+3. **Triggers:** `push` to `main` and `workflow_dispatch` only. Never `pull_request_target`, and never pass PR titles, branch names or other user input into `install_command` / `build_command`.
+4. **Branch protection on `main`:** require a pull request review, so no code reaches the server unreviewed.
+5. **Keep secrets on the server:** config with passwords goes in `~/private/` (outside the web root), or in environment variables, and the app reads it from there. The deploy never uploads `private/**` or `.env` files and never deletes them.
+6. **Protect what the app writes:** list upload, log and cache folders in `protected_paths`, so a deploy never deletes them.
+
+### On the server (once, with CR Servers support)
+
+- Upload folders must not run PHP. In each upload folder's `.htaccess`:
+
+  ```apache
+  <FilesMatch "\.(php|phtml|phar|php\d)$">
+    Require all denied
+  </FilesMatch>
+  Options -Indexes
+  ```
+
+- Database creation, migrations and install scripts (`install.php`) are not part of the deploy. Run them once by hand, or ask CR Servers support.
+
+### What it doesn't do
+
+- **No atomic switch:** FTP uploads file by file, so for a few seconds the app can be half old, half new. Deploys never cancel each other mid-upload (a newer run waits).
+- **No database changes.** Make schema changes backward compatible, or put the app in maintenance mode while they run.
+- **Undo** is `git revert` and deploy again.
+
 ## Static Deploy and AI Connect on the same site
 
 Both write to the same folder, so pick one per site. Each deploy uploads **`.htcrservers-deploy.json`** (repository, commit, ref, time; turn off with `deploy_marker: false`). Apache never serves `.ht*` files, so it stays private. When it's there, AI Connect tells the user that the site is published from GitHub and that changes made through the assistant will be replaced by the next deploy.
@@ -427,9 +516,17 @@ If a site moves from one to the other, say so in the repo README, and stop the d
 
 Customers pin the major tag **`v1`**. To release, tag the commit (`vX.Y.Z`) and move `v1` to it, after checking that existing inputs and secrets still work (no breaking changes within a major). Current: `v1` = `v1.4.0`.
 
+**Next: v1.5.0 (backend hardening), not tagged yet.** All new inputs are optional, but two defaults can stop a deploy that worked on v1.4.0, so check callers before moving `v1`:
+
+- **FTPS certificate check is on** (`ftp_security: strict`). A caller with `FTP_HOST` set to its own domain (`ftp.example.com`) instead of the node hostname fails the TLS check. Fix: use the node hostname; or `ftp_security: loose` temporarily.
+- **The server-only file check blocks** `.env`, keys, dumps, backups, `private/` and config files with literal passwords in the build output. Those files were being published, so failing is intended; `allow_files` covers false positives.
+
 ## Security
 
-- **FTPS only.** The default is `ftps`; `ftp` sends the password unencrypted, logs a warning, and will be refused in v2. Use the node hostname as `FTP_HOST` (see [FTPS hostname and certificate](#ftps-hostname-and-certificate)).
+- **FTPS only, certificate verified.** The default is `ftps` with `ftp_security: strict` (before v1.5.0 the certificate wasn't checked). `ftp` sends the password unencrypted, logs a warning, and will be refused in v2. Use the node hostname as `FTP_HOST` (see [FTPS hostname and certificate](#ftps-hostname-and-certificate)).
+- **Actions pinned by commit SHA** (Dependabot keeps them current), and gitleaks verified by SHA-256 before it runs.
+- **Checks before upload:** server-only files, secret scan, PHP syntax, Composer advisories (see [Backend code (PHP)](#backend-code-php)).
+- **Environments:** run the deploy job in a GitHub environment with required reviewers and environment-scoped FTP secrets (`environment` input).
 - **A deploy-only FTP account** jailed to the site folder (see [Required repository secrets](#required-repository-secrets)).
 - Do not pass untrusted user input into `install_command`, `build_command`, or `verify_command`.
 - `clean_deploy` deletes the entire remote `FTP_REMOTE_PATH`; use only for intentional full resets.

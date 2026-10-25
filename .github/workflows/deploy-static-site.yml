@@ -1,4 +1,5 @@
-# CR Servers Static Deploy — reusable workflow: checkout caller repo -> pnpm install/build/verify -> FTPS deploy.
+# CR Servers Static Deploy — reusable workflow: checkout caller repo -> pnpm install/build/verify ->
+# safety checks (server-only files, secret scan, PHP, Composer) -> FTPS deploy.
 # Caller: uses: edenia/crservers-static-deploy/.github/workflows/deploy-static-site.yml@<ref>
 # Cross-repo: map each FTP secret explicitly (secrets: inherit only works when caller and callee are the same repo).
 
@@ -84,6 +85,31 @@ on:
         type: string
         required: false
         default: ""
+      backend:
+        description: Strict mode for server code (PHP). Secret-scan findings and Composer advisories fail the deploy, clean_deploy is refused, and missing environment / protected_paths are flagged.
+        type: boolean
+        required: false
+        default: false
+      environment:
+        description: GitHub environment for the deploy job (e.g. production, staging). Use it for required reviewers, a main-only branch rule and environment-scoped FTP secrets. Empty = none.
+        type: string
+        required: false
+        default: ""
+      protected_paths:
+        description: Server paths the deploy never uploads or deletes, one glob per line, relative to FTP_REMOTE_PATH (e.g. uploads/** or photos/**). private/** and .env files are always protected.
+        type: string
+        required: false
+        default: ""
+      allow_files:
+        description: Files in the upload that the server-only file check should accept, one exact path per line relative to artifact_path. Use sparingly and say why in the caller workflow.
+        type: string
+        required: false
+        default: ""
+      ftp_security:
+        description: strict (default) verifies the FTPS certificate; loose skips the check and logs a warning. Use the node hostname as FTP_HOST so strict works.
+        type: string
+        required: false
+        default: "strict"
     secrets:
       FTP_HOST:
         required: true
@@ -98,9 +124,11 @@ permissions:
   contents: read
   actions: write
 
+# Never cancel a running deploy: stopping mid-upload leaves the site half old, half new.
+# A newer run waits; GitHub keeps only the latest pending one.
 concurrency:
   group: crservers-static-${{ github.repository }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -112,13 +140,13 @@ jobs:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v6
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
 
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ inputs.node_version }}
           cache: pnpm
@@ -139,8 +167,146 @@ jobs:
           VERIFY_COMMAND: ${{ inputs.verify_command }}
         run: bash -eo pipefail -c "$VERIFY_COMMAND"
 
+      # Safety checks run on the build output before it is stored as an artifact,
+      # so files that must stay on the server never leave the runner.
+      - name: "Check: server-only files"
+        env:
+          ART: ${{ inputs.artifact_path }}
+          ALLOW_FILES: ${{ inputs.allow_files }}
+        run: |
+          set -euo pipefail
+          root="${ART%/}"
+          if [ ! -d "$root" ]; then echo "::error::artifact_path '$ART' is not a folder after the build."; exit 1; fi
+          # A config-named PHP file is refused only when it holds a literal password, key or token
+          # (getenv()/constants from outside the web root are fine).
+          literal=$'(pass(word)?|passwd|pwd|secret|api[_-]?key|auth[_-]?key|token)[\x27"]?[[:space:]]*(=>|=|,|:)[[:space:]]*[\x27"][^\x27"$]{4,}[\x27"]'
+          found=0
+          while IFS= read -r -d '' f; do
+            rel="${f#"$root"/}"
+            if [ -n "$ALLOW_FILES" ] && printf '%s\n' "$ALLOW_FILES" | grep -qxF -- "$rel"; then continue; fi
+            lower=$(printf '%s' "$rel" | tr '[:upper:]' '[:lower:]')
+            base="${lower##*/}"
+            first="${lower%%/*}"
+            reason=""
+            case "/$lower" in
+              */.git/*|*/.svn/*|*/.hg/*) reason="version control data" ;;
+            esac
+            if [ -z "$reason" ] && [ "$first" != "$lower" ]; then
+              case "$first" in private|secret|secrets|credentials) reason="server-only folder ($first/)" ;; esac
+            fi
+            if [ -z "$reason" ] && [[ ! "$base" =~ (^|[._-])(example|sample|dist|template)([._-]|$) ]]; then
+              if [[ "$base" =~ ^\.env(\..+)?$ ]]; then
+                reason="environment file"
+              elif [[ "$base" =~ \.(pem|key|p12|pfx|jks|ppk|kdbx)$ || "$base" =~ ^id_(rsa|dsa|ecdsa|ed25519)$ ]]; then
+                reason="private key"
+              elif [[ "$base" =~ \.(sql|sqlite|sqlite3|bak|old|orig|swp|save)(\.(gz|zip|bz2|xz))?$ || "$base" =~ \.(bak|old|orig)[._-] || "$base" =~ ~$ ]]; then
+                reason="database dump or backup copy"
+              elif [[ "$base" =~ ^(credentials?|secrets?|client[_-]?secrets?|service[_-]?account|auth|sftp|ftp[_-]?config)([._-][^/]*)?\.(json|xml|ya?ml|ini|txt)$ || "$base" == "local.xml" ]]; then
+                reason="credentials file"
+              elif [[ "$base" =~ ^(wp-config|config|configuration|settings|local[._-]?settings|database|db|env|credentials?|secrets?|connection|conexion)([._-][^/]*)?\.php$ ]] && grep -Eiq "$literal" "$f"; then
+                reason="config file with a password, key or token written in it"
+              fi
+            fi
+            if [ -n "$reason" ]; then
+              echo "::error file=$rel::$rel must not be published: $reason. Keep it on the server only (for example ~/private/, outside the web root), or list it in allow_files if it is safe."
+              found=$((found + 1))
+            fi
+          done < <(find "$root" -type f -not -path '*/node_modules/*' -print0)
+          if [ "$found" -gt 0 ]; then
+            echo "### Server-only files: $found blocked" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          echo "Server-only files: none found."
+
+      - name: "Check: secret scan (gitleaks)"
+        env:
+          ART: ${{ inputs.artifact_path }}
+          BACKEND: ${{ inputs.backend }}
+          GITLEAKS_VERSION: "8.30.1"
+          GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+        run: |
+          set -euo pipefail
+          tmp="$RUNNER_TEMP/gitleaks"
+          mkdir -p "$tmp"
+          curl -fsSL -o "$tmp/gitleaks.tgz" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  $tmp/gitleaks.tgz" | sha256sum -c -
+          tar -xzf "$tmp/gitleaks.tgz" -C "$tmp" gitleaks
+          # The repo's own .gitleaksignore (fingerprints of accepted findings) and .gitleaks.toml apply.
+          args=(dir "${ART%/}" --no-banner --redact --exit-code 2 --report-format json --report-path "$tmp/report.json")
+          if [ -f .gitleaks.toml ]; then args+=(-c .gitleaks.toml); fi
+          set +e
+          "$tmp/gitleaks" "${args[@]}"
+          rc=$?
+          set -e
+          if [ "$rc" -eq 0 ]; then echo "Secret scan: no findings."; exit 0; fi
+          if [ "$rc" -ne 2 ]; then echo "::error::gitleaks failed (exit $rc)."; exit 1; fi
+          level=warning
+          if [ "$BACKEND" = "true" ]; then level=error; fi
+          jq -r --arg l "$level" '.[] | "::\($l) file=\(.File),line=\(.StartLine)::Possible secret (\(.RuleID)). Move it to the server (outside the web root) or, if it is public by design, add fingerprint \(.Fingerprint) to .gitleaksignore."' "$tmp/report.json"
+          n=$(jq length "$tmp/report.json")
+          echo "### Secret scan: $n possible secret(s) ($level)" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$BACKEND" = "true" ]; then exit 1; fi
+
+      - name: "Check: PHP"
+        env:
+          ART: ${{ inputs.artifact_path }}
+        run: |
+          set -euo pipefail
+          root="${ART%/}"
+          mapfile -d '' files < <(find "$root" -type f -name '*.php' -not -path '*/vendor/*' -not -path '*/node_modules/*' -print0)
+          if [ "${#files[@]}" -eq 0 ]; then echo "No PHP files to check."; exit 0; fi
+          ver=$(php -r 'echo PHP_VERSION;')
+          bad=0
+          for f in "${files[@]}"; do
+            if ! out=$(php -d display_errors=1 -l "$f" 2>&1); then
+              echo "::error file=${f#"$root"/}::PHP syntax error: $(printf '%s' "$out" | head -1)"
+              bad=$((bad + 1))
+            fi
+          done
+          # Calls worth a reviewer's look before they reach the server (not blocking).
+          risky='\b(eval|assert|exec|shell_exec|system|passthru|proc_open|popen|pcntl_exec|create_function)[[:space:]]*\(|\b(include|require)(_once)?[[:space:](]*\$_(GET|POST|REQUEST|COOKIE)|\bunserialize[[:space:]]*\([[:space:]]*\$_(GET|POST|REQUEST|COOKIE)'
+          hits=0
+          while IFS=: read -r file line _; do
+            echo "::warning file=${file#"$root"/},line=$line::Review this call before deploying: it can run commands or code."
+            hits=$((hits + 1))
+          done < <(grep -EnH "$risky" "${files[@]}" || true)
+          {
+            echo "### PHP: ${#files[@]} file(s), syntax checked with PHP $ver (match the server's version)"
+            echo "- Syntax errors: $bad"
+            echo "- Calls to review: $hits"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$bad" -gt 0 ]; then exit 1; fi
+
+      - name: "Check: Composer dependencies"
+        env:
+          ART: ${{ inputs.artifact_path }}
+          BACKEND: ${{ inputs.backend }}
+        run: |
+          set -euo pipefail
+          root="${ART%/}"
+          mapfile -d '' locks < <(find "$root" -type f -name composer.lock -not -path '*/vendor/*' -print0)
+          if [ "${#locks[@]}" -eq 0 ]; then echo "No composer.lock in the upload."; exit 0; fi
+          if ! command -v composer >/dev/null; then echo "::warning::composer is not available on this runner; dependency audit skipped."; exit 0; fi
+          level=warning
+          if [ "$BACKEND" = "true" ]; then level=error; fi
+          failed=0
+          for lock in "${locks[@]}"; do
+            dir=$(dirname "$lock")
+            rel="${dir#"$root"}"; rel="${rel#/}"; rel="${rel:-.}"
+            if [ ! -d "$dir/vendor" ]; then
+              echo "::warning file=${lock#"$root"/}::No vendor/ next to composer.lock in the upload. Install dependencies in build_command (composer install --no-dev --classmap-authoritative) so the server runs exactly the audited versions."
+            fi
+            if ! out=$(cd "$dir" && composer audit --locked --no-dev --no-interaction --format=plain 2>&1); then
+              echo "::$level file=${lock#"$root"/}::Composer advisories in $rel: $(printf '%s' "$out" | grep -m3 -E 'Package|CVE|Title' | tr '\n' ' ')"
+              echo "### Composer: advisories in $rel ($level)" >> "$GITHUB_STEP_SUMMARY"
+              failed=1
+            fi
+          done
+          if [ "$failed" -eq 1 ] && [ "$BACKEND" = "true" ]; then exit 1; fi
+          echo "Composer audit finished."
+
       - name: Upload site artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ inputs.artifact_name }}
           path: ${{ inputs.artifact_path }}
@@ -151,12 +317,13 @@ jobs:
     name: CR Servers Static Deploy — deploy (FTPS)
     runs-on: ubuntu-latest
     needs: build
+    environment: ${{ inputs.environment }}
     timeout-minutes: 45
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     steps:
       - name: Download site artifact
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: ${{ inputs.artifact_name }}
           path: out
@@ -183,6 +350,11 @@ jobs:
           FTP_PASSWORD: ${{ secrets.FTP_PASSWORD }}
           FTP_REMOTE_PATH: ${{ secrets.FTP_REMOTE_PATH }}
           FTP_PROTOCOL: ${{ inputs.ftp_protocol }}
+          FTP_SECURITY: ${{ inputs.ftp_security }}
+          BACKEND: ${{ inputs.backend }}
+          CLEAN_DEPLOY: ${{ inputs.clean_deploy }}
+          ENVIRONMENT: ${{ inputs.environment }}
+          PROTECTED_PATHS: ${{ inputs.protected_paths }}
         run: |
           set -e
           missing=0
@@ -199,6 +371,23 @@ jobs:
             ftp) echo "::warning::ftp_protocol 'ftp' sends your FTP password unencrypted. Use 'ftps' (the default) with the node hostname as FTP_HOST; plain FTP will be refused in v2." ;;
             *) echo "::error::ftp_protocol must be ftps, ftps-legacy or ftp (got '$FTP_PROTOCOL')."; missing=1 ;;
           esac
+          case "$FTP_SECURITY" in
+            strict) ;;
+            loose) echo "::warning::ftp_security 'loose' skips the FTPS certificate check, so a network attacker could capture the FTP password. Use the node hostname (e.g. iwx41.crservers.com) as FTP_HOST and the default 'strict'." ;;
+            *) echo "::error::ftp_security must be strict or loose (got '$FTP_SECURITY')."; missing=1 ;;
+          esac
+          if [ "$BACKEND" = "true" ]; then
+            if [ "$CLEAN_DEPLOY" = "true" ]; then
+              echo "::error::clean_deploy is refused with backend: true. It deletes everything under FTP_REMOTE_PATH, including uploads and server-only config."
+              missing=1
+            fi
+            if [ -z "$ENVIRONMENT" ]; then
+              echo "::warning::backend: true without an environment. Set environment: production and add required reviewers and a main-only rule to it in Settings → Environments."
+            fi
+            if [ -z "$PROTECTED_PATHS" ]; then
+              echo "::warning::backend: true without protected_paths. List folders the app writes on the server (uploads, photos, logs, cache) so a deploy never deletes them."
+            fi
+          fi
           if [ "$missing" -ne 0 ]; then
             exit 1
           fi
@@ -220,13 +409,39 @@ jobs:
           fi
           echo "FTP_REMOTE_PATH_NORMALIZED=$normalized" >> "$GITHUB_ENV"
 
+      - name: Protected server paths
+        id: exclude
+        env:
+          PROTECTED_PATHS: ${{ inputs.protected_paths }}
+        run: |
+          set -euo pipefail
+          # FTP-Deploy-Action neither uploads nor deletes excluded paths. Its own defaults
+          # (.git*, node_modules) are repeated because setting exclude replaces them.
+          list=$'**/.git*\n**/.git*/**\n**/node_modules/**\nprivate/**\n**/.env\n**/.env.*'
+          while IFS= read -r line; do
+            line="${line#"${line%%[![:space:]]*}"}"; line="${line%"${line##*[![:space:]]}"}"
+            [ -z "$line" ] && continue
+            case "$line" in
+              /*|*..*) echo "::error::protected_paths entry '$line' must be relative to FTP_REMOTE_PATH (no leading / or ..)."; exit 1 ;;
+            esac
+            list+=$'\n'"$line"
+          done <<< "$PROTECTED_PATHS"
+          {
+            echo "list<<CRS_EXCLUDE_EOF"
+            printf '%s\n' "$list"
+            echo "CRS_EXCLUDE_EOF"
+          } >> "$GITHUB_OUTPUT"
+          printf 'Never uploaded or deleted:\n%s\n' "$list"
+
       - name: Deploy via FTP
-        uses: SamKirkland/FTP-Deploy-Action@v4.4.0
+        uses: SamKirkland/FTP-Deploy-Action@3a9c65ae0fc12ac924ccef8afc26941cc43aad0b # v4.4.0
         with:
           server: ${{ secrets.FTP_HOST }}
           username: ${{ secrets.FTP_USER }}
           password: ${{ secrets.FTP_PASSWORD }}
           protocol: ${{ inputs.ftp_protocol }}
+          security: ${{ inputs.ftp_security }}
+          exclude: ${{ steps.exclude.outputs.list }}
           local-dir: ${{ inputs.ftp_local_dir }}
           server-dir: ${{ env.FTP_REMOTE_PATH_NORMALIZED }}
           log-level: ${{ inputs.dry_run && 'verbose' || inputs.ftp_log_level }}
@@ -243,6 +458,10 @@ jobs:
           DRY_RUN: ${{ inputs.dry_run }}
           CLEAN_DEPLOY: ${{ inputs.clean_deploy }}
           SITE_URL: ${{ inputs.site_url }}
+          BACKEND: ${{ inputs.backend }}
+          ENVIRONMENT: ${{ inputs.environment }}
+          FTP_SECURITY: ${{ inputs.ftp_security }}
+          PROTECTED_PATHS: ${{ inputs.protected_paths }}
         run: |
           {
             echo "## CR Servers Static Deploy"
@@ -250,5 +469,9 @@ jobs:
             echo "- **Ref:** \`${REF}\` @ \`${SHA}\`"
             echo "- **Dry run:** ${DRY_RUN}"
             echo "- **Clean slate:** ${CLEAN_DEPLOY}"
+            echo "- **Backend mode:** ${BACKEND}"
+            echo "- **Environment:** ${ENVIRONMENT:-none}"
+            echo "- **FTPS certificate check:** ${FTP_SECURITY}"
+            echo "- **Protected paths:** private/**, .env files${PROTECTED_PATHS:+, $(printf '%s' "$PROTECTED_PATHS" | tr '\n' ' ')}"
             if [ -n "$SITE_URL" ]; then echo "- **Public site:** ${SITE_URL}"; fi
           } >> "$GITHUB_STEP_SUMMARY"

@@ -11,12 +11,12 @@ permissions:
 
 jobs:
   check:
-    name: Lint workflows, scripts and the contact bundle
+    name: Lint workflows, scripts and the contact bundle; test the deploy safety checks
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: actionlint
         run: |
@@ -24,7 +24,10 @@ jobs:
           ./actionlint -color
 
       - name: shellcheck
-        run: shellcheck static-site-contact/install-on-server.sh
+        run: shellcheck static-site-contact/install-on-server.sh test/run-checks.sh
+
+      - name: Deploy safety checks (fixtures)
+        run: bash test/run-checks.sh
 
       - name: PHP syntax
         run: |
