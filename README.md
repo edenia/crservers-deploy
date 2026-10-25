@@ -466,7 +466,7 @@ Every deploy, static or backend, runs these checks on the build output **before*
 | Check | Static site | `backend: true` |
 |---|---|---|
 | Server-only files: `.env`, private keys, `.git` data, DB dumps, backup copies (`.bak`, `.old`, `~`), credential files, anything in `private/`, `secret(s)/`, `credentials/`, and config files (`wp-config.php`, `config.php`, `settings.php`, …) **with a password, key or token written in them** | Blocks | Blocks |
-| Secret scan ([gitleaks](https://github.com/gitleaks/gitleaks) 8.30.1, checksum-verified) | Warns (built JS often carries public API keys) | Blocks |
+| Secret scan ([gitleaks](https://github.com/gitleaks/gitleaks) 8.30.1, checksum-verified) | Warns (built JS often carries public API keys); if gitleaks can't be downloaded, the deploy goes on with a warning | Blocks, also when gitleaks can't be downloaded |
 | PHP syntax (`php -l`, outside `vendor/`) | Blocks | Blocks |
 | Risky PHP calls (`eval`, `exec`, `shell_exec`, `system`, includes of request input, …) | Warns for review | Warns for review |
 | Composer advisories (`composer audit` on each `composer.lock` in the repo or the upload) | Warns | Blocks |
@@ -516,7 +516,7 @@ If a site moves from one to the other, say so in the repo README, and stop the d
 
 Customers pin the major tag **`v1`**. To release, tag the commit (`vX.Y.Z`) and move `v1` to it, after checking that existing inputs and secrets still work (no breaking changes within a major). Current: `v1` = `v1.4.0`.
 
-**Next: v1.5.0 (backend hardening), not tagged yet.** All new inputs are optional, but two defaults can stop a deploy that worked on v1.4.0, so check callers before moving `v1`:
+**Backend hardening: v1.5.0 (tagged 2026-10-25) and v1.5.1 (a failed gitleaks download no longer stops static deploys); `v1` not moved yet.** Test with `@v1.5.1`. All new inputs are optional, but two defaults can stop a deploy that worked on v1.4.0, so check callers before moving `v1`:
 
 - **FTPS certificate check is on** (`ftp_security: strict`). A caller with `FTP_HOST` set to its own domain (`ftp.example.com`) instead of the node hostname fails the TLS check. Fix: use the node hostname; or `ftp_security: loose` temporarily.
 - **The server-only file check blocks** `.env`, keys, dumps, backups, `private/` and config files with literal passwords in the build output. Those files were being published, so failing is intended; `allow_files` covers false positives.

@@ -230,9 +230,18 @@ jobs:
           set -euo pipefail
           tmp="$RUNNER_TEMP/gitleaks"
           mkdir -p "$tmp"
-          curl -fsSL -o "$tmp/gitleaks.tgz" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
-          echo "${GITLEAKS_SHA256}  $tmp/gitleaks.tgz" | sha256sum -c -
-          tar -xzf "$tmp/gitleaks.tgz" -C "$tmp" gitleaks
+          # If the scanner can't be fetched or fails to run, only backend deploys stop: on a static
+          # site the scan is advisory, so a GitHub download hiccup must not block the deploy.
+          unavailable() {
+            if [ "$BACKEND" = "true" ]; then echo "::error::Secret scan unavailable: $1. backend: true needs it; re-run the deploy."; exit 1; fi
+            echo "::warning::Secret scan skipped: $1."
+            echo "### Secret scan: skipped ($1)" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          }
+          curl -fsSL --retry 3 --retry-delay 5 -o "$tmp/gitleaks.tgz" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            || unavailable "could not download gitleaks ${GITLEAKS_VERSION}"
+          echo "${GITLEAKS_SHA256}  $tmp/gitleaks.tgz" | sha256sum -c - || unavailable "gitleaks download failed the checksum"
+          tar -xzf "$tmp/gitleaks.tgz" -C "$tmp" gitleaks || unavailable "could not unpack gitleaks"
           # The repo's own .gitleaksignore (fingerprints of accepted findings) applies, and its
           # .gitleaks.toml if it has one. Otherwise: gitleaks' default rules, skipping third-party
           # code (vendor/, node_modules/).
@@ -247,7 +256,7 @@ jobs:
           rc=$?
           set -e
           if [ "$rc" -eq 0 ]; then echo "Secret scan: no findings."; exit 0; fi
-          if [ "$rc" -ne 2 ]; then echo "::error::gitleaks failed (exit $rc)."; exit 1; fi
+          if [ "$rc" -ne 2 ]; then unavailable "gitleaks failed (exit $rc)"; fi
           level=warning
           if [ "$BACKEND" = "true" ]; then level=error; fi
           jq -r --arg l "$level" '.[] | "::\($l) file=\(.File),line=\(.StartLine)::Possible secret (\(.RuleID)). Move it to the server (outside the web root) or, if it is public by design, add fingerprint \(.Fingerprint) to .gitleaksignore."' "$tmp/report.json"
