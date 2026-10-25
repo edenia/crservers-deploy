@@ -45,5 +45,12 @@ else
   echo "skip: $C (composer not installed here; CI runs it)"
 fi
 
+# The scanner can't be fetched (bogus version -> 404): static deploys warn and go on, backend deploys stop.
+S='Check: secret scan (gitleaks)'
+export GITLEAKS_VERSION=0.0.0-missing GITLEAKS_SHA256=0000 RUNNER_TEMP="$tmp"
+expect pass "$S" test/fixtures/good-site 'warning::Secret scan skipped: could not download gitleaks'
+BACKEND=true expect fail "$S" test/fixtures/good-site 'error::Secret scan unavailable'
+unset GITLEAKS_VERSION GITLEAKS_SHA256
+
 if [ "$fails" -gt 0 ]; then echo "$fails check(s) failed"; exit 1; fi
 echo "All safety-check tests passed."
