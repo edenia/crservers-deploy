@@ -264,6 +264,7 @@ jobs:
             fi
           done
           # Calls worth a reviewer's look before they reach the server (not blocking).
+          # shellcheck disable=SC2016 # $_GET etc. are PHP, matched literally
           risky='\b(eval|assert|exec|shell_exec|system|passthru|proc_open|popen|pcntl_exec|create_function)[[:space:]]*\(|\b(include|require)(_once)?[[:space:](]*\$_(GET|POST|REQUEST|COOKIE)|\bunserialize[[:space:]]*\([[:space:]]*\$_(GET|POST|REQUEST|COOKIE)'
           hits=0
           while IFS=: read -r file line _; do
