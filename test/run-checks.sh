@@ -37,5 +37,13 @@ expect pass "$P" test/fixtures/good-site
 expect fail "$P" test/fixtures/bad-php 'file=broken.php::PHP syntax error'
 expect fail "$P" test/fixtures/bad-php 'warning file=risky.php,line=2::'
 
+# Lockfiles outside the upload are audited too (here: static-site-contact/composer.lock in this repo).
+C='Check: Composer dependencies'
+if command -v composer >/dev/null; then
+  expect pass "$C" test/fixtures/good-site 'Auditing static-site-contact/composer.lock'
+else
+  echo "skip: $C (composer not installed here; CI runs it)"
+fi
+
 if [ "$fails" -gt 0 ]; then echo "$fails check(s) failed"; exit 1; fi
 echo "All safety-check tests passed."

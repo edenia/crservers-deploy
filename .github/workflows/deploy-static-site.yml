@@ -211,7 +211,9 @@ jobs:
               echo "::error file=$rel::$rel must not be published: $reason. Keep it on the server only (for example ~/private/, outside the web root), or list it in allow_files if it is safe."
               found=$((found + 1))
             fi
-          done < <(find "$root" -type f -not -path '*/node_modules/*' -print0)
+          # Third-party code (vendor/, node_modules/) is checked by the Composer audit, not here:
+          # packages ship files such as cacert.pem or .sql test fixtures.
+          done < <(find "$root" -type f -not -path '*/node_modules/*' -not -path '*/vendor/*' -print0)
           if [ "$found" -gt 0 ]; then
             echo "### Server-only files: $found blocked" >> "$GITHUB_STEP_SUMMARY"
             exit 1
@@ -231,9 +233,15 @@ jobs:
           curl -fsSL -o "$tmp/gitleaks.tgz" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
           echo "${GITLEAKS_SHA256}  $tmp/gitleaks.tgz" | sha256sum -c -
           tar -xzf "$tmp/gitleaks.tgz" -C "$tmp" gitleaks
-          # The repo's own .gitleaksignore (fingerprints of accepted findings) and .gitleaks.toml apply.
-          args=(dir "${ART%/}" --no-banner --redact --exit-code 2 --report-format json --report-path "$tmp/report.json")
-          if [ -f .gitleaks.toml ]; then args+=(-c .gitleaks.toml); fi
+          # The repo's own .gitleaksignore (fingerprints of accepted findings) applies, and its
+          # .gitleaks.toml if it has one. Otherwise: gitleaks' default rules, skipping third-party
+          # code (vendor/, node_modules/).
+          config=.gitleaks.toml
+          if [ ! -f "$config" ]; then
+            config="$tmp/config.toml"
+            printf '%s\n' '[extend]' 'useDefault = true' '' '[[allowlists]]' 'description = "Third-party code installed by Composer or npm"' "paths = ['''(^|/)(vendor|node_modules)/''']" > "$config"
+          fi
+          args=(dir "${ART%/}" --no-banner --redact --exit-code 2 -c "$config" --report-format json --report-path "$tmp/report.json")
           set +e
           "$tmp/gitleaks" "${args[@]}"
           rc=$?
@@ -285,20 +293,29 @@ jobs:
         run: |
           set -euo pipefail
           root="${ART%/}"
-          mapfile -d '' locks < <(find "$root" -type f -name composer.lock -not -path '*/vendor/*' -print0)
-          if [ "${#locks[@]}" -eq 0 ]; then echo "No composer.lock in the upload."; exit 0; fi
+          # Lockfiles in the upload and in the repo (the usual layout keeps composer.lock at the
+          # repo root and copies only vendor/ into the upload).
+          mapfile -d '' found < <(find "$root" . -type f -name composer.lock -not -path '*/vendor/*' -not -path '*/node_modules/*' -not -path './.git/*' -print0)
+          locks=()
+          declare -A seen=()
+          for lock in "${found[@]}"; do
+            real=$(realpath "$lock")
+            if [ -z "${seen[$real]:-}" ]; then seen[$real]=1; locks+=("$lock"); fi
+          done
+          if [ "${#locks[@]}" -eq 0 ]; then echo "No composer.lock in the repo or the upload."; exit 0; fi
           if ! command -v composer >/dev/null; then echo "::warning::composer is not available on this runner; dependency audit skipped."; exit 0; fi
           level=warning
           if [ "$BACKEND" = "true" ]; then level=error; fi
           failed=0
           for lock in "${locks[@]}"; do
             dir=$(dirname "$lock")
-            rel="${dir#"$root"}"; rel="${rel#/}"; rel="${rel:-.}"
-            if [ ! -d "$dir/vendor" ]; then
-              echo "::warning file=${lock#"$root"/}::No vendor/ next to composer.lock in the upload. Install dependencies in build_command (composer install --no-dev --classmap-authoritative) so the server runs exactly the audited versions."
+            rel="${dir#./}"
+            echo "Auditing $rel/composer.lock"
+            if [[ "$lock" == "$root"/* ]] && [ ! -d "$dir/vendor" ]; then
+              echo "::warning file=$lock::No vendor/ next to composer.lock in the upload. Install dependencies in build_command (composer install --no-dev --classmap-authoritative) so the server runs exactly the audited versions."
             fi
             if ! out=$(cd "$dir" && composer audit --locked --no-dev --no-interaction --format=plain 2>&1); then
-              echo "::$level file=${lock#"$root"/}::Composer advisories in $rel: $(printf '%s' "$out" | grep -m3 -E 'Package|CVE|Title' | tr '\n' ' ')"
+              echo "::$level file=${lock#./}::Composer advisories in $rel: $(printf '%s' "$out" | grep -m3 -E 'Package|CVE|Title' | tr '\n' ' ')"
               echo "### Composer: advisories in $rel ($level)" >> "$GITHUB_STEP_SUMMARY"
               failed=1
             fi

@@ -469,10 +469,10 @@ Every deploy, static or backend, runs these checks on the build output **before*
 | Secret scan ([gitleaks](https://github.com/gitleaks/gitleaks) 8.30.1, checksum-verified) | Warns (built JS often carries public API keys) | Blocks |
 | PHP syntax (`php -l`, outside `vendor/`) | Blocks | Blocks |
 | Risky PHP calls (`eval`, `exec`, `shell_exec`, `system`, includes of request input, …) | Warns for review | Warns for review |
-| Composer advisories (`composer audit` on each `composer.lock`) | Warns | Blocks |
+| Composer advisories (`composer audit` on each `composer.lock` in the repo or the upload) | Warns | Blocks |
 | `clean_deploy` | Allowed | Refused (it would delete uploads and server-only config) |
 
-Placeholder copies such as `config.example.php` or `.env.example` pass. If a finding is public by design, add its fingerprint to `.gitleaksignore` at the repo root (the annotation shows it); for a file the name check gets wrong, list it in `allow_files` and say why in the workflow.
+Third-party code in `vendor/` and `node_modules/` is skipped by the file check and the secret scan (packages ship files like `cacert.pem` or test `.sql` files); the Composer audit covers it. Placeholder copies such as `config.example.php` or `.env.example` pass. If a finding is public by design, add its fingerprint to `.gitleaksignore` at the repo root (the annotation shows it); a repo with its own `.gitleaks.toml` replaces the built-in config, so extend the defaults and allowlist `vendor/` there; for a file the name check gets wrong, list it in `allow_files` and say why in the workflow.
 
 ### Set up the repository
 
