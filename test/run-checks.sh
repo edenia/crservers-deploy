@@ -70,6 +70,7 @@ state() { # state <label> <setup function> <check function>
     echo "FAIL: sync state: $1 (exit $rc)"; sed 's/^/    /' "$tmp/out"; find "$srv" | sed 's/^/    /'; fails=$((fails + 1)); fi
 }
 none() { :; }
+no_folder() { rm -rf "$srv/site"; }
 old_only() { echo '{"version":"1.0.0","data":[{"name":"a.html"}]}' > "$old_state"; echo stray > "$srv/.ftp-deploy-sync-state.json"; }
 both() { echo '{"data":[1]}' > "$new_state"; echo old > "$old_state"; }
 offline() { export FAKE_FTP_FAIL=1; }
@@ -86,6 +87,7 @@ not_removed() { [ -e "$old_state" ] && grep -q "::warning::Could not delete" "$t
 refused() { not_removed && grep -q "curl exit 21: curl: (21) QUOT command failed" "$tmp/out"; }
 private() { ! grep -qF 'a\ss' "$tmp/ftp.log" && grep -qF 'user = "deploy@example.com:p\"a\\ss word"' "$srv.cfg"; }
 state "first deploy seeds an empty state" none seeded
+state "new folder (CWD refused): seeds an empty state and creates the folder" no_folder seeded
 state "old public state moves to the private name (site folder only)" old_only migrated
 state "already migrated: nothing uploaded, stray old copy removed" both kept
 state "server unreachable: warns, upload goes ahead" offline warned

@@ -517,12 +517,14 @@ jobs:
           esc() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
           printf 'user = "%s:%s"\n' "$(esc "$FTP_USER")" "$(esc "$FTP_PASSWORD")" > "$work/curl.cfg"
           ftp() { curl -sS --connect-timeout 30 --max-time 300 -K "$work/curl.cfg" "${tls[@]}" "$@"; }
-          # 0 = downloaded, 1 = not on the server, 2 = could not check.
+          # 0 = downloaded, 1 = not on the server (or its folder doesn't exist yet), 2 = could not check.
           fetch() {
             local rc=0
             ftp -o "$2" "$base$1" 2>"$work/err" || rc=$?
             if [ "$rc" -eq 0 ]; then return 0; fi
-            if [ "$rc" -eq 78 ]; then return 1; fi
+            # 78: file not found. 9: curl couldn't change into the folder (CWD 550), i.e. a first
+            # deploy into a new folder; the upload below creates it (--ftp-create-dirs).
+            if [ "$rc" -eq 78 ] || [ "$rc" -eq 9 ]; then return 1; fi
             echo "::warning::Could not check $1 on the server (curl exit $rc: $(head -c 200 "$work/err")). The upload goes ahead without preparing the sync state."
             return 2
           }

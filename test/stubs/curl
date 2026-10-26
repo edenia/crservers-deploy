@@ -38,5 +38,6 @@ if [ -n "$quote" ]; then
   exit 0
 fi
 if [ -n "$up" ]; then mkdir -p "$(dirname "$target")"; cp "$up" "$target"; exit 0; fi
+[ -d "$(dirname "$target")" ] || { echo "curl: (9) Server denied you to change to the given directory" >&2; exit 9; }
 [ -f "$target" ] || { echo "curl: (78) The file does not exist" >&2; exit 78; }
 cp "$target" "$out"
