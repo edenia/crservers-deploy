@@ -4,7 +4,7 @@ This folder is the **canonical** mail-endpoint bundle for static sites on **crse
 
 ## What to copy to a new account
 
-From a clone of **edenia/crservers-static-deploy**, sync into the domain **document root** on the account. On InterWorx this is often **`~/example.com/html/`** (FTP-relative: `example.com/html/` — see root README [InterWorx paths](../README.md#interworx--crservers-ftp-paths)). Replace `DOMAIN` below.
+From a clone of **edenia/crservers-deploy**, sync into the domain **document root** on the account. On InterWorx this is often **`~/example.com/html/`** (FTP-relative: `example.com/html/` — see root README [InterWorx paths](../README.md#interworx--crservers-ftp-paths)). Replace `DOMAIN` below.
 
 ```bash
 # Example: from your workstation (replace HOST, USER, DOMAIN)

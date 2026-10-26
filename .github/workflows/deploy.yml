@@ -1,6 +1,6 @@
 # CR Servers Deploy — reusable workflow: checkout caller repo -> pnpm install/build/verify ->
 # safety checks (server-only files, secret scan, PHP, Composer) -> FTPS deploy.
-# Caller: uses: edenia/crservers-static-deploy/.github/workflows/deploy-static-site.yml@<ref>
+# Caller: uses: edenia/crservers-deploy/.github/workflows/deploy.yml@<ref>
 # Cross-repo: map each FTP secret explicitly (secrets: inherit only works when caller and callee are the same repo).
 
 name: CR Servers Deploy
@@ -390,7 +390,7 @@ jobs:
           set -euo pipefail
           jq -n --arg repository "$REPOSITORY" --arg ref "$REF" --arg commit "$SHA" \
             --arg deployed_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            '{tool: "crservers-static-deploy", version: "v1", repository: $repository, ref: $ref, commit: $commit, deployed_at: $deployed_at}' \
+            '{tool: "crservers-static-deploy", version: "v2", repository: $repository, ref: $ref, commit: $commit, deployed_at: $deployed_at}' \
             > "${LOCAL_DIR%/}/.htcrservers-deploy.json"
           cat "${LOCAL_DIR%/}/.htcrservers-deploy.json"
 
@@ -419,7 +419,7 @@ jobs:
           esac
           case "$FTP_PROTOCOL" in
             ftps|ftps-legacy) ;;
-            ftp) echo "::warning::ftp_protocol 'ftp' sends your FTP password unencrypted. Use 'ftps' (the default) with the node hostname as FTP_HOST; plain FTP will be refused in v2." ;;
+            ftp) echo "::warning::ftp_protocol 'ftp' sends your FTP password unencrypted. Use 'ftps' (the default) with the node hostname as FTP_HOST; plain FTP will be refused in a future major version." ;;
             *) echo "::error::ftp_protocol must be ftps, ftps-legacy or ftp (got '$FTP_PROTOCOL')."; missing=1 ;;
           esac
           case "$FTP_SECURITY" in

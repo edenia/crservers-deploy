@@ -4,7 +4,7 @@ Universal contact endpoint (PHP + InterWorx / crservers)
 **Customers:** start with **`USERS-EASY-START.md`** (shortest path).
 
 **Edenia / crservers ops:** canonical folder to **rsync pre-copy** onto new InterWorx accounts:  
-`https://github.com/edenia/crservers-static-deploy/tree/main/static-site-contact`  
+`https://github.com/edenia/crservers-deploy/tree/main/static-site-contact`  
 (see `static-site-contact/README-EDENIA-OPS.md` there). See **`CANONICAL-SOURCE.txt`** in this repo for sync rules.
 
 Customer site repos may mirror this bundle under **`utils/contact-form/`** — keep them in sync with **`static-site-contact/`** here when PHP or Composer pins change.

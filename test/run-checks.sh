@@ -3,7 +3,7 @@
 # workflow (extracted with yq), and checks which fixtures pass and which are blocked.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-WF=.github/workflows/deploy-static-site.yml
+WF=.github/workflows/deploy.yml
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 export GITHUB_STEP_SUMMARY="$tmp/summary.md"

@@ -33,7 +33,7 @@ Each production deploy (FTP) should already place **`contact.php`**, **`composer
 2. Run: `bash install-on-server.sh`
 3. Edit the **`smtp.config.php`** path printed by the script (same as path A).
 
-If an older deploy is missing those files, copy them from your repo’s **`utils/contact-form/`** (or from the [canonical bundle](https://github.com/edenia/crservers-static-deploy/tree/main/static-site-contact)) into `public_html`, then run step 2.
+If an older deploy is missing those files, copy them from your repo’s **`utils/contact-form/`** (or from the [canonical bundle](https://github.com/edenia/crservers-deploy/tree/main/static-site-contact)) into `public_html`, then run step 2.
 
 ---
 
@@ -43,4 +43,4 @@ If an older deploy is missing those files, copy them from your repo’s **`utils
 - Spam / Turnstile / v0 prompts: **`OPERATOR.txt`**, **`V0-FORM-PROMPT.md`**
 
 **Canonical pre-copy bundle (for hosts):**  
-[edenia/crservers-static-deploy — `static-site-contact/`](https://github.com/edenia/crservers-static-deploy/tree/main/static-site-contact)
+[edenia/crservers-deploy — `static-site-contact/`](https://github.com/edenia/crservers-deploy/tree/main/static-site-contact)
