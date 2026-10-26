@@ -13,6 +13,11 @@ on:
         type: string
         required: false
         default: "22"
+      package_manager:
+        description: pnpm (default), yarn or npm. Picks the dependency cache and, for pnpm, installs pnpm; set install_command / build_command / verify_command to match (e.g. yarn install --immutable).
+        type: string
+        required: false
+        default: "pnpm"
       install_command:
         description: Install dependencies (trusted — repo maintainers only)
         type: string
@@ -142,14 +147,29 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - name: Check package manager
+        env:
+          PACKAGE_MANAGER: ${{ inputs.package_manager }}
+        run: |
+          case "$PACKAGE_MANAGER" in
+            pnpm|yarn|npm) ;;
+            *) echo "::error::package_manager must be pnpm, yarn or npm (got '$PACKAGE_MANAGER')."; exit 1 ;;
+          esac
+
       - name: Setup pnpm
+        if: ${{ inputs.package_manager == 'pnpm' }}
         uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
 
       - name: Setup Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ inputs.node_version }}
-          cache: pnpm
+          cache: ${{ inputs.package_manager }}
+
+      # Yarn 2+ repos pin their Yarn (packageManager / .yarnrc.yml yarnPath); corepack provides it.
+      - name: Enable corepack (yarn)
+        if: ${{ inputs.package_manager == 'yarn' }}
+        run: corepack enable
 
       - name: Install dependencies
         env:
