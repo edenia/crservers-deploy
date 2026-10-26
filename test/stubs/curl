@@ -22,9 +22,12 @@ target="$FAKE_FTP_ROOT/$path"
 if [ -n "$quote" ]; then
   # Like curl: a "+" command runs after CWD into the URL's folder; an unprefixed one runs in the login folder.
   case "$quote" in
-    +*) where="$target"; quote="${quote#+}" ;;
+    # Real curl never sent a "+" command for a folder listing on iwx41 (no DELE in xfer.log).
+    +*) [ "${url%/}" != "$url" ] && exit 0; where="$target"; quote="${quote#+}" ;;
     *) where="$FAKE_FTP_ROOT/" ;;
   esac
+  # A server that accepts the command but deletes nothing (what curl's exit code alone can't tell).
+  [ -n "${FAKE_FTP_NO_DELETE:-}" ] && exit 0
   name="${quote#DELE }"
   [ -f "$where$name" ] || { echo "curl: (21) Quote command returned error" >&2; exit 21; }
   rm "$where$name"

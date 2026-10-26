@@ -550,11 +550,18 @@ jobs:
             echo "Sync state: $STATE_NAME is on the server."
           fi
           if [ "$old" -eq 1 ]; then
-            # "+" sends DELE after curl has changed into the site folder (unprefixed runs in the login folder).
-            if ftp -o /dev/null -Q "+DELE $OLD_STATE_NAME" "$base" 2>"$work/err"; then
+            # DELE with the path from the login folder, on a URL without a folder, so curl sends it
+            # before any directory change. ("+DELE" on a folder URL was never sent on iwx41.)
+            root="${base%"$dir"}"
+            rc=0
+            ftp -o /dev/null -Q "DELE ${dir}${OLD_STATE_NAME}" "$root" 2>"$work/err" || rc=$?
+            # Only trust a download that says the file is gone.
+            gone=0
+            fetch "$OLD_STATE_NAME" "$work/check.json" || gone=$?
+            if [ "$gone" -eq 1 ]; then
               echo "Removed the public $OLD_STATE_NAME from the server."
             else
-              echo "::warning::Could not delete $OLD_STATE_NAME ($(head -c 200 "$work/err")). Delete it by hand: anyone can download it and see every deployed file."
+              echo "::warning::Could not delete $OLD_STATE_NAME (curl exit $rc: $(head -c 200 "$work/err")). Delete it by hand: anyone can download it and see every deployed file."
             fi
           fi
 
