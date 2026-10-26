@@ -369,7 +369,8 @@ jobs:
     runs-on: ubuntu-latest
     needs: build
     environment: ${{ inputs.environment }}
-    timeout-minutes: 45
+    # Room for two full uploads (the first attempt and its retry), so a late failure's retry isn't cut off.
+    timeout-minutes: 90
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     steps:
@@ -484,7 +485,12 @@ jobs:
           } >> "$GITHUB_OUTPUT"
           printf 'Never uploaded or deleted:\n%s\n' "$list"
 
+      # One retry: a single failed TLS data connection (seen once in ~1000 uploads on iwx41)
+      # otherwise fails the whole deploy. FTP-Deploy-Action saves its sync state only at the
+      # end, so the retry uploads again everything that changed since the last successful deploy.
       - name: Deploy via FTP
+        id: ftp
+        continue-on-error: true
         uses: SamKirkland/FTP-Deploy-Action@3a9c65ae0fc12ac924ccef8afc26941cc43aad0b # v4.4.0
         with:
           server: ${{ secrets.FTP_HOST }}
@@ -500,6 +506,42 @@ jobs:
           dangerous-clean-slate: ${{ inputs.clean_deploy }}
           timeout: ${{ inputs.ftp_timeout_ms }}
 
+      - name: Wait before retrying the upload
+        if: steps.ftp.outcome == 'failure'
+        run: |
+          echo "::warning::The FTP upload failed; retrying once in 20 seconds. The retry re-sends every file changed since the last successful deploy."
+          sleep 20
+
+      - name: Deploy via FTP (retry)
+        id: ftp_retry
+        if: steps.ftp.outcome == 'failure'
+        uses: SamKirkland/FTP-Deploy-Action@3a9c65ae0fc12ac924ccef8afc26941cc43aad0b # v4.4.0
+        with:
+          server: ${{ secrets.FTP_HOST }}
+          username: ${{ secrets.FTP_USER }}
+          password: ${{ secrets.FTP_PASSWORD }}
+          protocol: ${{ inputs.ftp_protocol }}
+          security: ${{ inputs.ftp_security }}
+          exclude: ${{ steps.exclude.outputs.list }}
+          local-dir: ${{ inputs.ftp_local_dir }}
+          server-dir: ${{ env.FTP_REMOTE_PATH_NORMALIZED }}
+          log-level: ${{ inputs.dry_run && 'verbose' || inputs.ftp_log_level }}
+          dry-run: ${{ inputs.dry_run }}
+          dangerous-clean-slate: ${{ inputs.clean_deploy }}
+          timeout: ${{ inputs.ftp_timeout_ms }}
+
+      - name: Explain a failed upload
+        if: failure() && steps.ftp_retry.outcome == 'failure'
+        env:
+          FTP_SECURITY: ${{ inputs.ftp_security }}
+        run: |
+          # FTP-Deploy-Action's first error line suggests SFTP even when the real cause is the certificate.
+          if [ "$FTP_SECURITY" = "strict" ]; then
+            echo "::error::The upload failed twice. If the log mentions the certificate, altnames or ERR_TLS_CERT_ALTNAME_INVALID, set the FTP_HOST secret to the server hostname (e.g. iwx41.crservers.com), not your domain or an IP address. Ignore the action's hint about SFTP: CR Servers uses FTPS."
+          else
+            echo "::error::The upload failed twice. Check FTP_HOST (the server hostname, e.g. iwx41.crservers.com), FTP_USER, FTP_PASSWORD and FTP_REMOTE_PATH. Ignore the action's hint about SFTP: CR Servers uses FTPS."
+          fi
+
       - name: Job summary
         if: always()
         env:
@@ -509,6 +551,8 @@ jobs:
           DRY_RUN: ${{ inputs.dry_run }}
           CLEAN_DEPLOY: ${{ inputs.clean_deploy }}
           SITE_URL: ${{ inputs.site_url }}
+          FTP_OUTCOME: ${{ steps.ftp.outcome }}
+          FTP_RETRY_OUTCOME: ${{ steps.ftp_retry.outcome }}
           BACKEND: ${{ inputs.backend }}
           ENVIRONMENT: ${{ inputs.environment }}
           FTP_SECURITY: ${{ inputs.ftp_security }}
@@ -520,6 +564,7 @@ jobs:
             echo "- **Ref:** \`${REF}\` @ \`${SHA}\`"
             echo "- **Dry run:** ${DRY_RUN}"
             echo "- **Clean slate:** ${CLEAN_DEPLOY}"
+            if [ "$FTP_OUTCOME" = "failure" ]; then echo "- **Upload:** first attempt failed, retry ${FTP_RETRY_OUTCOME}"; fi
             echo "- **Backend mode:** ${BACKEND}"
             echo "- **Environment:** ${ENVIRONMENT:-none}"
             echo "- **FTPS certificate check:** ${FTP_SECURITY}"
