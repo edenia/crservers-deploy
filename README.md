@@ -517,7 +517,7 @@ If a site moves from one to the other, say so in the repo README, and stop the d
 
 Customers pin the major tag **`v1`**. To release, tag the commit (`vX.Y.Z`) and move `v1` to it, after checking that existing inputs and secrets still work (no breaking changes within a major). Current: `v1` = `v1.4.0`.
 
-**Backend hardening: v1.5.0 (tagged 2026-10-25), v1.5.1 (a failed gitleaks download no longer stops static deploys) and v1.6.0 (`package_manager` for yarn/npm repos); `v1` not moved yet.** Test with `@v1.6.0`. All new inputs are optional, but two defaults can stop a deploy that worked on v1.4.0, so check callers before moving `v1`:
+**Backend hardening: v1.5.0 (tagged 2026-10-25), v1.5.1 (a failed gitleaks download no longer stops static deploys) and v1.6.0 (`package_manager` for yarn/npm repos; hidden files such as `.htaccess` are deployed again — the artifact upload had been dropping them since upload-artifact v4.4); `v1` not moved yet.** Test with `@v1.6.0`. All new inputs are optional, but two defaults can stop a deploy that worked on v1.4.0, so check callers before moving `v1`:
 
 - **FTPS certificate check is on** (`ftp_security: strict`). A caller with `FTP_HOST` set to its own domain (`ftp.example.com`) instead of the node hostname fails the TLS check. Fix: use the node hostname; or `ftp_security: loose` temporarily.
 - **The server-only file check blocks** `.env`, keys, dumps, backups, `private/` and config files with literal passwords in the build output. Those files were being published, so failing is intended; `allow_files` covers false positives.

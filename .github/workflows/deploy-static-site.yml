@@ -357,6 +357,10 @@ jobs:
         with:
           name: ${{ inputs.artifact_name }}
           path: ${{ inputs.artifact_path }}
+          # .htaccess and .well-known/ are part of the site. upload-artifact skips hidden files by
+          # default (since v4.4), which silently dropped them; the server-only check above already
+          # refused .env, .git and other hidden files that must not be published.
+          include-hidden-files: true
           if-no-files-found: error
           retention-days: ${{ inputs.artifact_retention_days }}
 
