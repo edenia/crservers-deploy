@@ -550,7 +550,8 @@ jobs:
             echo "Sync state: $STATE_NAME is on the server."
           fi
           if [ "$old" -eq 1 ]; then
-            if ftp -o /dev/null -Q "DELE $OLD_STATE_NAME" "$base" 2>"$work/err"; then
+            # "+" sends DELE after curl has changed into the site folder (unprefixed runs in the login folder).
+            if ftp -o /dev/null -Q "+DELE $OLD_STATE_NAME" "$base" 2>"$work/err"; then
               echo "Removed the public $OLD_STATE_NAME from the server."
             else
               echo "::warning::Could not delete $OLD_STATE_NAME ($(head -c 200 "$work/err")). Delete it by hand: anyone can download it and see every deployed file."

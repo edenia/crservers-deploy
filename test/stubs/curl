@@ -20,9 +20,14 @@ done
 path="${url#*://}"; path="${path#*/}"
 target="$FAKE_FTP_ROOT/$path"
 if [ -n "$quote" ]; then
+  # Like curl: a "+" command runs after CWD into the URL's folder; an unprefixed one runs in the login folder.
+  case "$quote" in
+    +*) where="$target"; quote="${quote#+}" ;;
+    *) where="$FAKE_FTP_ROOT/" ;;
+  esac
   name="${quote#DELE }"
-  [ -f "$target$name" ] || { echo "curl: (21) Quote command returned error" >&2; exit 21; }
-  rm "$target$name"
+  [ -f "$where$name" ] || { echo "curl: (21) Quote command returned error" >&2; exit 21; }
+  rm "$where$name"
   exit 0
 fi
 if [ -n "$up" ]; then mkdir -p "$(dirname "$target")"; cp "$up" "$target"; exit 0; fi

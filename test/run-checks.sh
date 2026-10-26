@@ -55,29 +55,35 @@ unset GITLEAKS_VERSION GITLEAKS_SHA256
 # Sync state before the upload, against a stub curl that keeps the "server" in a temp folder.
 yq -r '.jobs.deploy.steps[] | select(.name == "Prepare sync state") | .run' "$WF" > "$tmp/state.sh"
 srv="$tmp/srv"
-state() { # state <label> <expected exit> <setup command> <assertion command>
+new_state="$srv/site/.htcrservers-deploy-state.json"
+old_state="$srv/site/.ftp-deploy-sync-state.json"
+state() { # state <label> <setup function> <check function>
   rm -rf "$srv" "$srv.cfg"; mkdir -p "$srv/site"; : > "$tmp/ftp.log"
-  eval "$3"
+  "$2"
   local rc=0
   PATH="$PWD/test/stubs:$PATH" FAKE_FTP_ROOT="$srv" FAKE_FTP_LOG="$tmp/ftp.log" RUNNER_TEMP="$tmp/rt" \
     FTP_HOST=iwx41.example FTP_USER='deploy@example.com' FTP_PASSWORD='p"a\ss word' FTP_PROTOCOL=ftps FTP_SECURITY=strict \
     FTP_REMOTE_PATH_NORMALIZED=site/ STATE_NAME=.htcrservers-deploy-state.json OLD_STATE_NAME=.ftp-deploy-sync-state.json \
     bash "$tmp/state.sh" > "$tmp/out" 2>&1 || rc=$?
   unset FAKE_FTP_FAIL
-  if [ "$rc" -eq "$2" ] && eval "$4"; then echo "ok:   sync state: $1"; else
-    echo "FAIL: sync state: $1 (exit $rc)"; sed 's/^/    /' "$tmp/out"; ls -la "$srv/site" | sed 's/^/    /'; fails=$((fails + 1)); fi
+  if [ "$rc" -eq 0 ] && "$3"; then echo "ok:   sync state: $1"; else
+    echo "FAIL: sync state: $1 (exit $rc)"; sed 's/^/    /' "$tmp/out"; find "$srv" | sed 's/^/    /'; fails=$((fails + 1)); fi
 }
-N="$srv/site/.htcrservers-deploy-state.json"; O="$srv/site/.ftp-deploy-sync-state.json"
-state "first deploy seeds an empty state" 0 ':' \
-  '[ "$(jq -r ".version, (.data|length)" "$N" | tr "\n" " ")" = "1.0.0 0 " ] && [ ! -e "$O" ]'
-state "old public state moves to the private name" 0 'echo "{\"version\":\"1.0.0\",\"data\":[{\"name\":\"a.html\"}]}" > "$srv/site/.ftp-deploy-sync-state.json"' \
-  '[ "$(jq -r ".data[0].name" "$N")" = a.html ] && [ ! -e "$O" ] && grep -q "Removed the public" "$tmp/out"'
-state "already migrated: nothing uploaded, stray old copy removed" 0 'echo "{\"data\":[1]}" > "$srv/site/.htcrservers-deploy-state.json"; echo old > "$srv/site/.ftp-deploy-sync-state.json"' \
-  '[ "$(jq -c .data "$N")" = "[1]" ] && [ ! -e "$O" ] && ! grep -q -- "-T" "$tmp/ftp.log"'
-state "server unreachable: warns, upload goes ahead" 0 'export FAKE_FTP_FAIL=1' \
-  'grep -q "::warning::Could not check" "$tmp/out" && [ ! -e "$N" ]'
-state "password stays out of the command line, escaped in the config" 0 ':' \
-  '! grep -q "a\\\\ss" "$tmp/ftp.log" && grep -qF "user = \"deploy@example.com:p\\\"a\\\\ss word\"" "$srv.cfg"'
+none() { :; }
+old_only() { echo '{"version":"1.0.0","data":[{"name":"a.html"}]}' > "$old_state"; echo stray > "$srv/.ftp-deploy-sync-state.json"; }
+both() { echo '{"data":[1]}' > "$new_state"; echo old > "$old_state"; }
+offline() { export FAKE_FTP_FAIL=1; }
+seeded() { [ "$(jq -r '.version, (.data|length)' "$new_state" | tr '\n' ' ')" = "1.0.0 0 " ] && [ ! -e "$old_state" ]; }
+# The copy in the login folder must survive: only the site folder's file is deleted.
+migrated() { [ "$(jq -r '.data[0].name' "$new_state")" = a.html ] && [ ! -e "$old_state" ] && [ -e "$srv/.ftp-deploy-sync-state.json" ] && grep -q "Removed the public" "$tmp/out"; }
+kept() { [ "$(jq -c .data "$new_state")" = "[1]" ] && [ ! -e "$old_state" ] && ! grep -q -- "-T" "$tmp/ftp.log"; }
+warned() { grep -q "::warning::Could not check" "$tmp/out" && [ ! -e "$new_state" ]; }
+private() { ! grep -qF 'a\ss' "$tmp/ftp.log" && grep -qF 'user = "deploy@example.com:p\"a\\ss word"' "$srv.cfg"; }
+state "first deploy seeds an empty state" none seeded
+state "old public state moves to the private name (site folder only)" old_only migrated
+state "already migrated: nothing uploaded, stray old copy removed" both kept
+state "server unreachable: warns, upload goes ahead" offline warned
+state "password stays out of the command line, escaped in the config" none private
 
 if [ "$fails" -gt 0 ]; then echo "$fails check(s) failed"; exit 1; fi
 echo "All safety-check tests passed."
