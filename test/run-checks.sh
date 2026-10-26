@@ -73,7 +73,8 @@ none() { :; }
 old_only() { echo '{"version":"1.0.0","data":[{"name":"a.html"}]}' > "$old_state"; echo stray > "$srv/.ftp-deploy-sync-state.json"; }
 both() { echo '{"data":[1]}' > "$new_state"; echo old > "$old_state"; }
 offline() { export FAKE_FTP_FAIL=1; }
-silent_delete() { old_only; export FAKE_FTP_NO_DELETE=1; }
+silent_delete() { old_only; export FAKE_FTP_NO_DELETE=silent; }
+refused_delete() { old_only; export FAKE_FTP_NO_DELETE=fail; }
 seeded() { [ "$(jq -r '.version, (.data|length)' "$new_state" | tr '\n' ' ')" = "1.0.0 0 " ] && [ ! -e "$old_state" ]; }
 # The copy in the login folder must survive: only the site folder's file is deleted.
 migrated() { [ "$(jq -r '.data[0].name' "$new_state")" = a.html ] && [ ! -e "$old_state" ] && [ -e "$srv/.ftp-deploy-sync-state.json" ] && grep -q "Removed the public" "$tmp/out"; }
@@ -81,12 +82,15 @@ kept() { [ "$(jq -c .data "$new_state")" = "[1]" ] && [ ! -e "$old_state" ] && !
 warned() { grep -q "::warning::Could not check" "$tmp/out" && [ ! -e "$new_state" ]; }
 # Only claim the old file is gone when a fresh download says so.
 not_removed() { [ -e "$old_state" ] && grep -q "::warning::Could not delete" "$tmp/out" && ! grep -q "Removed the public" "$tmp/out"; }
+# The warning carries the DELE error, not the follow-up download's.
+refused() { not_removed && grep -q "curl exit 21: curl: (21) QUOT command failed" "$tmp/out"; }
 private() { ! grep -qF 'a\ss' "$tmp/ftp.log" && grep -qF 'user = "deploy@example.com:p\"a\\ss word"' "$srv.cfg"; }
 state "first deploy seeds an empty state" none seeded
 state "old public state moves to the private name (site folder only)" old_only migrated
 state "already migrated: nothing uploaded, stray old copy removed" both kept
 state "server unreachable: warns, upload goes ahead" offline warned
 state "delete that does nothing: warns, never claims removal" silent_delete not_removed
+state "delete refused: warning shows the DELE error" refused_delete refused
 state "password stays out of the command line, escaped in the config" none private
 
 if [ "$fails" -gt 0 ]; then echo "$fails check(s) failed"; exit 1; fi

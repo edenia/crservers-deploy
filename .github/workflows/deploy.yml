@@ -554,14 +554,14 @@ jobs:
             # before any directory change. ("+DELE" on a folder URL was never sent on iwx41.)
             root="${base%"$dir"}"
             rc=0
-            ftp -o /dev/null -Q "DELE ${dir}${OLD_STATE_NAME}" "$root" 2>"$work/err" || rc=$?
+            ftp -o /dev/null -Q "DELE ${dir}${OLD_STATE_NAME}" "$root" 2>"$work/dele.err" || rc=$?
             # Only trust a download that says the file is gone.
             gone=0
             fetch "$OLD_STATE_NAME" "$work/check.json" || gone=$?
             if [ "$gone" -eq 1 ]; then
               echo "Removed the public $OLD_STATE_NAME from the server."
             else
-              echo "::warning::Could not delete $OLD_STATE_NAME (curl exit $rc: $(head -c 200 "$work/err")). Delete it by hand: anyone can download it and see every deployed file."
+              echo "::warning::Could not delete $OLD_STATE_NAME (curl exit $rc: $(head -c 200 "$work/dele.err")). Delete it by hand: anyone can download it and see every deployed file."
             fi
           fi
 

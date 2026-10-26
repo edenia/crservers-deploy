@@ -27,7 +27,11 @@ if [ -n "$quote" ]; then
     *) where="$FAKE_FTP_ROOT/" ;;
   esac
   # A server that accepts the command but deletes nothing (what curl's exit code alone can't tell).
-  [ -n "${FAKE_FTP_NO_DELETE:-}" ] && exit 0
+  # FAKE_FTP_NO_DELETE=silent: accepted, nothing deleted (exit 0); =fail: the server refuses it.
+  case "${FAKE_FTP_NO_DELETE:-}" in
+    silent) exit 0 ;;
+    fail) echo "curl: (21) QUOT command failed with 550" >&2; exit 21 ;;
+  esac
   name="${quote#DELE }"
   [ -f "$where$name" ] || { echo "curl: (21) Quote command returned error" >&2; exit 21; }
   rm "$where$name"
