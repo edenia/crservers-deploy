@@ -1,12 +1,14 @@
-# CR Servers Static Deploy
+# CR Servers Deploy
 
-**CR Servers Static Deploy** publishes a website kept in GitHub to CR Servers shared hosting. It is also **the preferred way to deploy server code (PHP apps)** to CR Servers: see [Backend code (PHP)](#backend-code-php). A reusable GitHub Actions workflow builds a static export (for example Next.js `output: "export"`) and uploads it over **FTPS** with [SamKirkland/FTP-Deploy-Action](https://github.com/SamKirkland/FTP-Deploy-Action). The repo also holds the **contact form bundle** (`static-site-contact/`) for static sites that need to send mail.
+> Formerly **CR Servers Static Deploy** (renamed 2026-10-25: it now deploys PHP apps too). The repo name, the workflow path and the deploy marker (`tool: "crservers-static-deploy"`) keep the old name, so existing workflows keep working unchanged.
+
+**CR Servers Deploy** publishes a website kept in GitHub to CR Servers shared hosting. It is also **the preferred way to deploy server code (PHP apps)** to CR Servers: see [Backend code (PHP)](#backend-code-php). A reusable GitHub Actions workflow builds a static export (for example Next.js `output: "export"`) and uploads it over **FTPS** with [SamKirkland/FTP-Deploy-Action](https://github.com/SamKirkland/FTP-Deploy-Action). The repo also holds the **contact form bundle** (`static-site-contact/`) for static sites that need to send mail.
 
 Maintained by **Edenia** for CR Servers hosting. Customer repos stay thin: they call this workflow and supply the FTP secrets.
 
 **Which tool for which site:**
 
-| | CR Servers Static Deploy | CR Servers AI Connect |
+| | CR Servers Deploy | CR Servers AI Connect |
 |---|---|---|
 | For | Developers whose site lives in a GitHub repo | Clients who update their site by asking ChatGPT or Claude |
 | How changes arrive | A push to the repo builds and uploads the site | The assistant drafts changes, shows a preview, publishes on confirmation |
@@ -14,7 +16,7 @@ Maintained by **Edenia** for CR Servers hosting. Customer repos stay thin: they 
 | Server code (PHP, `.htaccess`) | Allowed (trusted repo maintainers); `backend: true` adds strict checks | Refused |
 | Before upload | Blocks server-only files (config with passwords, `.env`, keys, dumps, backups), scans for secrets, checks PHP syntax and Composer advisories | Refuses server code; never shows files that may hold passwords |
 
-Use **one of them per site** (see [Static Deploy and AI Connect on the same site](#static-deploy-and-ai-connect-on-the-same-site)). Client docs: [crservers.com/support](https://crservers.com/support).
+Use **one of them per site** (see [CR Servers Deploy and AI Connect on the same site](#cr-servers-deploy-and-ai-connect-on-the-same-site)). Client docs: [crservers.com/support](https://crservers.com/support).
 
 Customer repos should set **`packageManager`** in `package.json` (for example `"packageManager": "pnpm@9.15.9"`). `pnpm/action-setup` reads that field and no separate pnpm version is passed from the workflow (avoids mismatch with a pinned major in CI).
 
@@ -341,7 +343,7 @@ cd crservers-static-deploy
 git remote add origin git@github.com:edenia/crservers-static-deploy.git   # skip if origin already set
 git branch -M main
 git add -A && git status
-git commit -am "CR Servers Static Deploy reusable workflow"   # if you have local changes
+git commit -am "CR Servers Deploy reusable workflow"   # if you have local changes
 git push -u origin main
 git tag v1 && git push origin v1
 ```
@@ -354,7 +356,7 @@ If GitHub created a first commit (for example a default `README.md`) and `git pu
 cd crservers-static-deploy
 git init
 git add .
-git commit -m "CR Servers Static Deploy reusable workflow"
+git commit -m "CR Servers Deploy reusable workflow"
 gh repo create edenia/crservers-static-deploy --public --source=. --remote=origin --push
 git tag v1 && git push origin v1
 ```
@@ -423,7 +425,7 @@ Options -Indexes
 
 ## Backend code (PHP)
 
-Static Deploy is the preferred way to put server code (a PHP app, an API) on CR Servers hosting. AI Connect stays static-only on purpose. Code lives in Git, every change can be reviewed, and the FTP password stays in GitHub.
+CR Servers Deploy is the preferred way to put server code (a PHP app, an API) on CR Servers hosting. AI Connect stays static-only on purpose. Code lives in Git, every change can be reviewed, and the FTP password stays in GitHub.
 
 ### Caller workflow
 
@@ -503,13 +505,13 @@ Third-party code in `vendor/` and `node_modules/` is skipped by the file check a
 - **No database changes.** Make schema changes backward compatible, or put the app in maintenance mode while they run.
 - **Undo** is `git revert` and deploy again.
 
-## Static Deploy and AI Connect on the same site
+## CR Servers Deploy and AI Connect on the same site
 
 Both write to the same folder, so pick one per site. Each deploy uploads **`.htcrservers-deploy.json`** (repository, commit, ref, time; turn off with `deploy_marker: false`). Apache never serves `.ht*` files, so it stays private. When it's there, AI Connect tells the user that the site is published from GitHub and that changes made through the assistant will be replaced by the next deploy.
 
 
-- **AI Connect protects files changed outside it.** After a Static Deploy upload, AI Connect refuses to publish over, or undo, the files that changed (it reports a conflict instead of overwriting work it didn't make).
-- **Static Deploy overwrites whatever is in the repo**, including changes an assistant published, on the next push.
+- **AI Connect protects files changed outside it.** After a CR Servers Deploy upload, AI Connect refuses to publish over, or undo, the files that changed (it reports a conflict instead of overwriting work it didn't make).
+- **CR Servers Deploy overwrites whatever is in the repo**, including changes an assistant published, on the next push.
 
 If a site moves from one to the other, say so in the repo README, and stop the deploy workflow (or remove AI Connect's access in the client area) for the tool you no longer use.
 
