@@ -24,7 +24,7 @@ jobs:
           ./actionlint -color
 
       - name: shellcheck
-        run: shellcheck static-site-contact/install-on-server.sh test/run-checks.sh
+        run: shellcheck static-site-contact/install-on-server.sh test/run-checks.sh test/stubs/curl
 
       - name: Deploy safety checks (fixtures)
         run: bash test/run-checks.sh

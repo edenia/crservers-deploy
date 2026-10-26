@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Stand-in for curl in test/run-checks.sh: an FTP server whose files live in $FAKE_FTP_ROOT.
+# Supports what the "Prepare sync state" step uses: -o FILE (download), -T FILE (upload),
+# -Q "DELE name" (delete in the URL's folder). Logs each call's arguments to $FAKE_FTP_LOG.
+set -euo pipefail
+printf '%s\n' "$*" >> "$FAKE_FTP_LOG"
+if [ -n "${FAKE_FTP_FAIL:-}" ]; then echo "curl: (7) Failed to connect" >&2; exit 7; fi
+out="" up="" quote="" url=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) out=$2; shift 2 ;;
+    -T) up=$2; shift 2 ;;
+    -Q) quote=$2; shift 2 ;;
+    -K) cp "$2" "$FAKE_FTP_ROOT.cfg"; shift 2 ;;
+    --connect-timeout|--max-time) shift 2 ;;
+    ftp://*|ftps://*) url=$1; shift ;;
+    *) shift ;;
+  esac
+done
+path="${url#*://}"; path="${path#*/}"
+target="$FAKE_FTP_ROOT/$path"
+if [ -n "$quote" ]; then
+  name="${quote#DELE }"
+  [ -f "$target$name" ] || { echo "curl: (21) Quote command returned error" >&2; exit 21; }
+  rm "$target$name"
+  exit 0
+fi
+if [ -n "$up" ]; then mkdir -p "$(dirname "$target")"; cp "$up" "$target"; exit 0; fi
+[ -f "$target" ] || { echo "curl: (78) The file does not exist" >&2; exit 78; }
+cp "$target" "$out"
