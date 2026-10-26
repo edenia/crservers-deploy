@@ -70,7 +70,7 @@ chmod 600 ~/private/smtp.config.php
 nano ~/private/smtp.config.php   # set smtp_*, mail_from_*, mail_to, etc.
 ```
 
-`contact.php` loads **`/home/ACCOUNT/private/smtp.config.php`** when the site lives under **`~/DOMAIN/html/`** (also checks **`~/DOMAIN/private/`** as a fallback).
+`contact.php` loads **`~/DOMAIN/private/smtp.config.php`** first when the site lives under **`~/DOMAIN/html/`**, then **`/home/ACCOUNT/private/smtp.config.php`**. The first one found wins, so a per-site file (what CR Servers' managed contact form writes) overrides the account-wide one.
 
 ### Option B — Environment variables (good if your host injects env into PHP)
 

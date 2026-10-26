@@ -14,7 +14,7 @@ declare(strict_types=1);
  *
  * SMTP and mail routing:
  * - Prefer environment variables for secrets (SMTP_HOST, SMTP_USER, SMTP_PASSWORD, MAIL_TO, …).
- * - Optional private/smtp.config.php merges first (account or domain level); env overrides when set.
+ * - Optional private/smtp.config.php: the domain level (~/DOMAIN/private) wins over the account level (~/private); env overrides when set.
  *
  * Deploy: composer install --no-dev next to contact.php; configure secrets (env and/or private file).
  * AJAX / fetch: send X-Requested-With: XMLHttpRequest or Accept: application/json for JSON responses.
@@ -553,10 +553,12 @@ if (!is_file($vendor)) {
 }
 require $vendor;
 
+// The site's own config (~/DOMAIN/private, next to html/) wins over the account-wide one (~/private):
+// managed installs write the domain level, and an older account-level file must not override it.
 $cfg = [];
 foreach ([
-    dirname(__DIR__, 2) . '/private/smtp.config.php',
     dirname(__DIR__) . '/private/smtp.config.php',
+    dirname(__DIR__, 2) . '/private/smtp.config.php',
 ] as $configPath) {
     if (!is_file($configPath)) {
         continue;

@@ -24,7 +24,7 @@ jobs:
           ./actionlint -color
 
       - name: shellcheck
-        run: shellcheck static-site-contact/install-on-server.sh test/run-checks.sh test/stubs/curl
+        run: shellcheck static-site-contact/install-on-server.sh test/run-checks.sh test/contact-config-order.sh test/stubs/curl
 
       - name: Deploy safety checks (fixtures)
         run: bash test/run-checks.sh
@@ -33,6 +33,9 @@ jobs:
         run: |
           php -v | head -1
           for f in static-site-contact/*.php; do php -l "$f"; done
+
+      - name: contact.php config order
+        run: bash test/contact-config-order.sh
 
       - name: composer validate
         working-directory: static-site-contact

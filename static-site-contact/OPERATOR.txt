@@ -41,7 +41,8 @@ nothing sensitive is in git:
 | `DEFAULT_MAIL_SUBJECT` | When the form has no `subject` field |
 | `REPLY_TO_FIELD` | Exact field name if not `email` |
 
-Optional file **`/home/ACCOUNT/private/smtp.config.php`** merges first; **non-empty
+Optional file **`~/DOMAIN/private/smtp.config.php`** (per site) or
+**`/home/ACCOUNT/private/smtp.config.php`** (account-wide); the per-site file wins; **non-empty
 env vars override** the file (so you can keep only non-secret defaults in the file).
 
 You still need **`composer install --no-dev`** in the web root next to `contact.php`
