@@ -8,7 +8,7 @@ Applies to any static or Next.js site on crservers that uses the `utils/contact-
 Read **`USERS-EASY-START.md`** — two short paths: **pre-provisioned files** on the account (run `install-on-server.sh` + edit one config file) **or** static export from GitHub then the same server steps.
 
 **Canonical bundle to copy onto new accounts (Edenia ops):**  
-[edenia/crservers-static-deploy — `static-site-contact/`](https://github.com/edenia/crservers-static-deploy/tree/main/static-site-contact)
+[edenia/crservers-deploy — `static-site-contact/`](https://github.com/edenia/crservers-deploy/tree/main/static-site-contact)
 
 ---
 

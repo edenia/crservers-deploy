@@ -1,12 +1,14 @@
-# CR Servers Static Deploy
+# CR Servers Deploy
 
-**CR Servers Static Deploy** publishes a website kept in GitHub to CR Servers shared hosting. It is also **the preferred way to deploy server code (PHP apps)** to CR Servers: see [Backend code (PHP)](#backend-code-php). A reusable GitHub Actions workflow builds a static export (for example Next.js `output: "export"`) and uploads it over **FTPS** with [SamKirkland/FTP-Deploy-Action](https://github.com/SamKirkland/FTP-Deploy-Action). The repo also holds the **contact form bundle** (`static-site-contact/`) for static sites that need to send mail.
+> Formerly **CR Servers Static Deploy** in the repo `edenia/crservers-static-deploy` (renamed 2026-10-25: it now deploys PHP apps too). GitHub redirects the old repo name, and `v1` still points at v1.4.0 with the old workflow file `deploy-static-site.yml`, so existing `@v1` callers keep working. New setups use `edenia/crservers-deploy/.github/workflows/deploy.yml@v2`; see [Upgrading from v1](#upgrading-from-v1). The deploy marker keeps `tool: "crservers-static-deploy"` (AI Connect matches it).
+
+**CR Servers Deploy** publishes a website kept in GitHub to CR Servers shared hosting. It is also **the preferred way to deploy server code (PHP apps)** to CR Servers: see [Backend code (PHP)](#backend-code-php). A reusable GitHub Actions workflow builds a static export (for example Next.js `output: "export"`) and uploads it over **FTPS** with [SamKirkland/FTP-Deploy-Action](https://github.com/SamKirkland/FTP-Deploy-Action). The repo also holds the **contact form bundle** (`static-site-contact/`) for static sites that need to send mail.
 
 Maintained by **Edenia** for CR Servers hosting. Customer repos stay thin: they call this workflow and supply the FTP secrets.
 
 **Which tool for which site:**
 
-| | CR Servers Static Deploy | CR Servers AI Connect |
+| | CR Servers Deploy | CR Servers AI Connect |
 |---|---|---|
 | For | Developers whose site lives in a GitHub repo | Clients who update their site by asking ChatGPT or Claude |
 | How changes arrive | A push to the repo builds and uploads the site | The assistant drafts changes, shows a preview, publishes on confirmation |
@@ -14,13 +16,13 @@ Maintained by **Edenia** for CR Servers hosting. Customer repos stay thin: they 
 | Server code (PHP, `.htaccess`) | Allowed (trusted repo maintainers); `backend: true` adds strict checks | Refused |
 | Before upload | Blocks server-only files (config with passwords, `.env`, keys, dumps, backups), scans for secrets, checks PHP syntax and Composer advisories | Refuses server code; never shows files that may hold passwords |
 
-Use **one of them per site** (see [Static Deploy and AI Connect on the same site](#static-deploy-and-ai-connect-on-the-same-site)). Client docs: [crservers.com/support](https://crservers.com/support).
+Use **one of them per site** (see [CR Servers Deploy and AI Connect on the same site](#cr-servers-deploy-and-ai-connect-on-the-same-site)). Client docs: [crservers.com/support](https://crservers.com/support).
 
 Customer repos should set **`packageManager`** in `package.json` (for example `"packageManager": "pnpm@9.15.9"`). `pnpm/action-setup` reads that field and no separate pnpm version is passed from the workflow (avoids mismatch with a pinned major in CI).
 
 ## Usage (customer repository)
 
-Add a workflow that references this repo (pin a **tag** such as `@v1` in production instead of `@main`):
+Add a workflow that references this repo (pin a **tag** such as `@v2` in production instead of `@main`):
 
 ```yaml
 name: Deploy static site
@@ -35,7 +37,7 @@ permissions:
 
 jobs:
   deploy-site:
-    uses: edenia/crservers-static-deploy/.github/workflows/deploy-static-site.yml@v1
+    uses: edenia/crservers-deploy/.github/workflows/deploy.yml@v2
     secrets:
       FTP_HOST: ${{ secrets.FTP_HOST }}
       FTP_USER: ${{ secrets.FTP_USER }}
@@ -97,7 +99,7 @@ on:
 
 jobs:
   deploy-site:
-    uses: edenia/crservers-static-deploy/.github/workflows/deploy-static-site.yml@v1
+    uses: edenia/crservers-deploy/.github/workflows/deploy.yml@v2
     secrets:
       FTP_HOST: ${{ secrets.FTP_HOST }}
       FTP_USER: ${{ secrets.FTP_USER }}
@@ -158,7 +160,7 @@ Use this when onboarding a new static or Next.js customer repository.
    - `images: { unoptimized: true }` if the app uses `next/image`
 2. **`package.json`** — `packageManager` (matches `pnpm-lock.yaml`), `verify:static-out` (e.g. `test -f out/index.html`)
 3. **`public/.htaccess`** — Apache rules for shared hosting (see [below](#recommended-publichtaccess-next-static-export))
-4. **Caller workflow** — `.github/workflows/deploy-static-site.yml` calling `edenia/crservers-static-deploy/.../deploy-static-site.yml@v1` with FTP secrets mapped explicitly
+4. **Caller workflow** — `.github/workflows/deploy.yml` calling `edenia/crservers-deploy/.../deploy.yml@v2` with FTP secrets mapped explicitly
 5. **GitHub Actions** — secrets `FTP_*`; optional variable `SITE_URL` (public URL for deploy summaries only)
 6. **First deploy** — run workflow with **dry_run** once, then production; confirm the live site (not only a green Actions run)
 7. **Optional contact form** — copy **`static-site-contact/`** into `public/` (or pre-provision on the server), configure SMTP per **`USERS-EASY-START.md`**
@@ -330,20 +332,20 @@ Notes:
 
 Canonical remote:
 
-`git@github.com:edenia/crservers-static-deploy.git`
+`git@github.com:edenia/crservers-deploy.git`
 
 ### Repo already exists on GitHub (empty or with a README)
 
 From your local clone of this directory:
 
 ```bash
-cd crservers-static-deploy
-git remote add origin git@github.com:edenia/crservers-static-deploy.git   # skip if origin already set
+cd crservers-deploy
+git remote add origin git@github.com:edenia/crservers-deploy.git   # skip if origin already set
 git branch -M main
 git add -A && git status
-git commit -am "CR Servers Static Deploy reusable workflow"   # if you have local changes
+git commit -am "CR Servers Deploy reusable workflow"   # if you have local changes
 git push -u origin main
-git tag v1 && git push origin v1
+git tag v2 && git push origin v2
 ```
 
 If GitHub created a first commit (for example a default `README.md`) and `git push` is rejected, run `git fetch origin` and either merge with `git pull origin main --allow-unrelated-histories` and resolve conflicts, or coordinate with your team before any force push.
@@ -351,15 +353,15 @@ If GitHub created a first commit (for example a default `README.md`) and `git pu
 ### Create the repo from scratch with GitHub CLI
 
 ```bash
-cd crservers-static-deploy
+cd crservers-deploy
 git init
 git add .
-git commit -m "CR Servers Static Deploy reusable workflow"
-gh repo create edenia/crservers-static-deploy --public --source=. --remote=origin --push
-git tag v1 && git push origin v1
+git commit -m "CR Servers Deploy reusable workflow"
+gh repo create edenia/crservers-deploy --public --source=. --remote=origin --push
+git tag v2 && git push origin v2
 ```
 
-Use a **public** repo if customer sites live in other GitHub orgs or accounts; otherwise callers cannot resolve `uses: edenia/crservers-static-deploy/...` unless you rely on Enterprise or org access you already control.
+Use a **public** repo if customer sites live in other GitHub orgs or accounts; otherwise callers cannot resolve `uses: edenia/crservers-deploy/...` unless you rely on Enterprise or org access you already control.
 
 ## What runs where
 
@@ -423,7 +425,7 @@ Options -Indexes
 
 ## Backend code (PHP)
 
-Static Deploy is the preferred way to put server code (a PHP app, an API) on CR Servers hosting. AI Connect stays static-only on purpose. Code lives in Git, every change can be reviewed, and the FTP password stays in GitHub.
+CR Servers Deploy is the preferred way to put server code (a PHP app, an API) on CR Servers hosting. AI Connect stays static-only on purpose. Code lives in Git, every change can be reviewed, and the FTP password stays in GitHub.
 
 ### Caller workflow
 
@@ -441,7 +443,7 @@ permissions:
 
 jobs:
   deploy:
-    uses: edenia/crservers-static-deploy/.github/workflows/deploy-static-site.yml@v1
+    uses: edenia/crservers-deploy/.github/workflows/deploy.yml@v2
     secrets:
       FTP_HOST: ${{ secrets.FTP_HOST }}
       FTP_USER: ${{ secrets.FTP_USER }}
@@ -503,28 +505,34 @@ Third-party code in `vendor/` and `node_modules/` is skipped by the file check a
 - **No database changes.** Make schema changes backward compatible, or put the app in maintenance mode while they run.
 - **Undo** is `git revert` and deploy again.
 
-## Static Deploy and AI Connect on the same site
+## CR Servers Deploy and AI Connect on the same site
 
 Both write to the same folder, so pick one per site. Each deploy uploads **`.htcrservers-deploy.json`** (repository, commit, ref, time; turn off with `deploy_marker: false`). Apache never serves `.ht*` files, so it stays private. When it's there, AI Connect tells the user that the site is published from GitHub and that changes made through the assistant will be replaced by the next deploy.
 
 
-- **AI Connect protects files changed outside it.** After a Static Deploy upload, AI Connect refuses to publish over, or undo, the files that changed (it reports a conflict instead of overwriting work it didn't make).
-- **Static Deploy overwrites whatever is in the repo**, including changes an assistant published, on the next push.
+- **AI Connect protects files changed outside it.** After a CR Servers Deploy upload, AI Connect refuses to publish over, or undo, the files that changed (it reports a conflict instead of overwriting work it didn't make).
+- **CR Servers Deploy overwrites whatever is in the repo**, including changes an assistant published, on the next push.
 
 If a site moves from one to the other, say so in the repo README, and stop the deploy workflow (or remove AI Connect's access in the client area) for the tool you no longer use.
 
 ## Versioning
 
-Customers pin the major tag **`v1`**. To release, tag the commit (`vX.Y.Z`) and move `v1` to it, after checking that existing inputs and secrets still work (no breaking changes within a major). Current: `v1` = `v1.4.0`.
+Customers pin the major tag **`v2`**. To release, tag the commit (`vX.Y.Z`) and move `v2` to it, after checking that existing inputs and secrets still work (no breaking changes within a major). Current: `v2` = `v2.0.0`.
 
-**Backend hardening: v1.5.0 (tagged 2026-10-25), v1.5.1 (a failed gitleaks download no longer stops static deploys) and v1.6.0 (`package_manager` for yarn/npm repos; hidden files such as `.htaccess` are deployed again — the artifact upload had been dropping them since upload-artifact v4.4); `v1` not moved yet.** Test with `@v1.6.0`. All new inputs are optional, but two defaults can stop a deploy that worked on v1.4.0, so check callers before moving `v1`:
+**`v1` stays at `v1.4.0`** (repo then named `crservers-static-deploy`, workflow `deploy-static-site.yml`) and won't move: v1.5.0–v1.6.0 changed defaults that can stop a deploy that worked on v1.4.0, so that work ships as **v2.0.0** instead (backend hardening, `package_manager`, hidden files such as `.htaccess` deployed again, the gitleaks download warning, and the new name).
 
-- **FTPS certificate check is on** (`ftp_security: strict`). A caller with `FTP_HOST` set to its own domain (`ftp.example.com`) instead of the node hostname fails the TLS check. Fix: use the node hostname; or `ftp_security: loose` temporarily.
-- **The server-only file check blocks** `.env`, keys, dumps, backups, `private/` and config files with literal passwords in the build output. Those files were being published, so failing is intended; `allow_files` covers false positives.
+### Upgrading from v1
+
+1. Change the caller's `uses:` line to `edenia/crservers-deploy/.github/workflows/deploy.yml@v2`. Inputs and secrets are the same; the new inputs are optional.
+2. Check the two defaults that can stop a deploy that worked on v1.4.0:
+   - **FTPS certificate check is on** (`ftp_security: strict`). A caller with `FTP_HOST` set to its own domain (`ftp.example.com`) instead of the node hostname fails the TLS check. Fix: use the node hostname; or `ftp_security: loose` temporarily.
+   - **The server-only file check blocks** `.env`, keys, dumps, backups, `private/` and config files with literal passwords in the build output. Those files were being published, so failing is intended; `allow_files` covers false positives.
+3. Hidden files in the build output (`.htaccess`, `.well-known/`) are uploaded again.
+4. If branch protection requires the deploy check by name, update it: the jobs are now "CR Servers Deploy — build" and "CR Servers Deploy — deploy (FTPS)".
 
 ## Security
 
-- **FTPS only, certificate verified.** The default is `ftps` with `ftp_security: strict` (before v1.5.0 the certificate wasn't checked). `ftp` sends the password unencrypted, logs a warning, and will be refused in v2. Use the node hostname as `FTP_HOST` (see [FTPS hostname and certificate](#ftps-hostname-and-certificate)).
+- **FTPS only, certificate verified.** The default is `ftps` with `ftp_security: strict` (before v1.5.0 the certificate wasn't checked). `ftp` sends the password unencrypted, logs a warning, and will be refused in a future major version. Use the node hostname as `FTP_HOST` (see [FTPS hostname and certificate](#ftps-hostname-and-certificate)).
 - **Actions pinned by commit SHA** (Dependabot keeps them current), and gitleaks verified by SHA-256 before it runs.
 - **Checks before upload:** server-only files, secret scan, PHP syntax, Composer advisories (see [Backend code (PHP)](#backend-code-php)).
 - **Environments:** run the deploy job in a GitHub environment with required reviewers and environment-scoped FTP secrets (`environment` input).

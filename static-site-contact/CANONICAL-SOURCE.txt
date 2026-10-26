@@ -1,7 +1,7 @@
 Canonical bundle (pre-copy to new InterWorx accounts, rsync from here):
-  https://github.com/edenia/crservers-static-deploy/tree/main/static-site-contact
+  https://github.com/edenia/crservers-deploy/tree/main/static-site-contact
 
 When changing contact.php, Composer pins, or install docs:
-  1) Edit edenia/crservers-static-deploy/static-site-contact/ (merge via PR)
+  1) Edit edenia/crservers-deploy/static-site-contact/ (merge via PR)
   2) Copy changed files into each customer site repo under utils/contact-form/
      (or into public/ so static export + FTP deploy includes them in out/)
