@@ -20,10 +20,15 @@ else
   echo "Option A — on your Mac/Linux, from this same folder run:" >&2
   echo "  curl -sS https://getcomposer.org/installer | php" >&2
   echo "  php composer.phar install --no-dev --no-interaction" >&2
+  echo "  rm -f vendor/phpmailer/phpmailer/get_oauth_token.php" >&2
   echo "  Then upload the new vendor/ directory next to contact.php." >&2
   echo "Option B — ask your host to enable the Composer CLI for your SSH user." >&2
   exit 1
 fi
+
+# PHPMailer's OAuth helper is a script meant to be run once by hand. vendor/ sits in the web root, so it
+# would be reachable on the web (found live on several sites, 2026-10-26); the form doesn't use OAuth.
+rm -f vendor/phpmailer/phpmailer/get_oauth_token.php
 
 PARENT="$(cd "$DIR/.." && pwd)"
 GRANDPARENT="$(cd "$DIR/../.." && pwd)"

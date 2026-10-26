@@ -221,6 +221,7 @@ curl -sS -X POST 'https://yourdomain.com/contact.php' \
 - [ ] Mailbox created; SMTP host/port/TLS known  
 - [ ] `contact.php` + `composer.json` + `composer.lock` in web root  
 - [ ] `composer install --no-dev` → `vendor/` exists  
+- [ ] `vendor/phpmailer/phpmailer/get_oauth_token.php` deleted, and `/vendor/` blocked in `.htaccess` (`RedirectMatch 404 ^/vendor/`)  
 - [ ] `~/private/smtp.config.php` **or** env vars with SMTP + MAIL_TO  
 - [ ] `chmod 600` on private config  
 - [ ] curl test returns `ok: true`  

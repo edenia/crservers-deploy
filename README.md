@@ -543,7 +543,7 @@ Customers pin the major tag **`v2`**. To release, tag the commit (`vX.Y.Z`) and 
 - **A deploy-only FTP account** jailed to the site folder (see [Required repository secrets](#required-repository-secrets)).
 - Do not pass untrusted user input into `install_command`, `build_command`, or `verify_command`.
 - `clean_deploy` deletes the entire remote `FTP_REMOTE_PATH`; use only for intentional full resets.
-- **Contact bundle files:** our nodes already answer 403 for `composer.json` / `composer.lock`. As defense in depth, add this to the site's `public/.htaccess` so the rest of the bundle (setup notes, install script, `vendor/`) is never served; `contact.php` reads `vendor/` from disk, so the form keeps working:
+- **Contact bundle files:** our nodes already answer 403 for `composer.json` / `composer.lock`. **Add this to the site's `public/.htaccess` (required when `vendor/` is in the web root):** it keeps the rest of the bundle (setup notes, install script, `vendor/`) from being served, including PHPMailer's `get_oauth_token.php` helper, which was found reachable on live sites. `contact.php` reads `vendor/` from disk, so the form keeps working. `install-on-server.sh` also deletes that helper; if `vendor/` is built in CI, delete it in `build_command` too (`rm -f out/vendor/phpmailer/phpmailer/get_oauth_token.php`):
 
   ```apache
   <FilesMatch "^(composer\.(json|lock)|install-on-server\.sh|smtp\.config\.example\.php|USERS-EASY-START\.md|SETUP\.md|OPERATOR\.txt)$">
