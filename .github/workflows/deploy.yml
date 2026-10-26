@@ -485,6 +485,88 @@ jobs:
           } >> "$GITHUB_OUTPUT"
           printf 'Never uploaded or deleted:\n%s\n' "$list"
 
+      # FTP-Deploy-Action's first download of a missing state file (550) breaks its FTPS session on
+      # iwx41: the next data socket gets ECONNRESET. This step makes sure a state file exists before
+      # the action runs, each curl call on its own connection. The state lives under a .ht* name,
+      # which Apache never serves (the old .ftp-deploy-sync-state.json listed every file with hashes).
+      - name: Prepare sync state
+        if: ${{ !inputs.dry_run }}
+        env:
+          FTP_HOST: ${{ secrets.FTP_HOST }}
+          FTP_USER: ${{ secrets.FTP_USER }}
+          FTP_PASSWORD: ${{ secrets.FTP_PASSWORD }}
+          FTP_PROTOCOL: ${{ inputs.ftp_protocol }}
+          FTP_SECURITY: ${{ inputs.ftp_security }}
+          STATE_NAME: .htcrservers-deploy-state.json
+          OLD_STATE_NAME: .ftp-deploy-sync-state.json
+        run: |
+          set -euo pipefail
+          dir="${FTP_REMOTE_PATH_NORMALIZED#/}"
+          tls=()
+          case "$FTP_PROTOCOL" in
+            ftps) base="ftp://$FTP_HOST/$dir"; tls=(--ssl-reqd) ;;
+            ftps-legacy) base="ftps://$FTP_HOST/$dir" ;;
+            *) base="ftp://$FTP_HOST/$dir" ;;
+          esac
+          if [ "$FTP_SECURITY" = "loose" ]; then tls+=(-k); fi
+          work="$RUNNER_TEMP/crs-sync-state"
+          umask 077
+          mkdir -p "$work"
+          trap 'rm -rf "$work"' EXIT
+          # Credentials go in a curl config file, not on the command line.
+          esc() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
+          printf 'user = "%s:%s"\n' "$(esc "$FTP_USER")" "$(esc "$FTP_PASSWORD")" > "$work/curl.cfg"
+          ftp() { curl -sS --connect-timeout 30 --max-time 300 -K "$work/curl.cfg" "${tls[@]}" "$@"; }
+          # 0 = downloaded, 1 = not on the server (or its folder doesn't exist yet), 2 = could not check.
+          fetch() {
+            local rc=0
+            ftp -o "$2" "$base$1" 2>"$work/err" || rc=$?
+            if [ "$rc" -eq 0 ]; then return 0; fi
+            # 78: file not found. 9: curl couldn't change into the folder (CWD 550), i.e. a first
+            # deploy into a new folder; the upload below creates it (--ftp-create-dirs).
+            if [ "$rc" -eq 78 ] || [ "$rc" -eq 9 ]; then return 1; fi
+            echo "::warning::Could not check $1 on the server (curl exit $rc: $(head -c 200 "$work/err")). The upload goes ahead without preparing the sync state."
+            return 2
+          }
+          old=0; rc=0
+          fetch "$OLD_STATE_NAME" "$work/old.json" || rc=$?
+          if [ "$rc" -eq 2 ]; then exit 0; elif [ "$rc" -eq 0 ]; then old=1; fi
+          rc=0
+          fetch "$STATE_NAME" "$work/state.json" || rc=$?
+          if [ "$rc" -eq 2 ]; then exit 0; fi
+          if [ "$rc" -eq 1 ]; then
+            if [ "$old" -eq 1 ]; then
+              cp "$work/old.json" "$work/state.json"
+              source="the previous state ($OLD_STATE_NAME)"
+            else
+              # Same as the action's own first-publish state: an empty server, so everything uploads.
+              printf '{"description":"Sync state for CR Servers Deploy. Deleting it makes the next deploy upload everything again.","version":"1.0.0","generatedTime":%s000,"data":[]}\n' "$(date +%s)" > "$work/state.json"
+              source="an empty state (first deploy: everything uploads)"
+            fi
+            if ! ftp --ftp-create-dirs -T "$work/state.json" "$base$STATE_NAME" 2>"$work/err"; then
+              echo "::warning::Could not save the sync state ($(head -c 200 "$work/err")). The upload goes ahead without it."
+              exit 0
+            fi
+            echo "Sync state: saved $source as $STATE_NAME."
+          else
+            echo "Sync state: $STATE_NAME is on the server."
+          fi
+          if [ "$old" -eq 1 ]; then
+            # DELE with the path from the login folder, on a URL without a folder, so curl sends it
+            # before any directory change. ("+DELE" on a folder URL was never sent on iwx41.)
+            root="${base%"$dir"}"
+            rc=0
+            ftp -o /dev/null -Q "DELE ${dir}${OLD_STATE_NAME}" "$root" 2>"$work/dele.err" || rc=$?
+            # Only trust a download that says the file is gone.
+            gone=0
+            fetch "$OLD_STATE_NAME" "$work/check.json" || gone=$?
+            if [ "$gone" -eq 1 ]; then
+              echo "Removed the public $OLD_STATE_NAME from the server."
+            else
+              echo "::warning::Could not delete $OLD_STATE_NAME (curl exit $rc: $(head -c 200 "$work/dele.err")). Delete it by hand: anyone can download it and see every deployed file."
+            fi
+          fi
+
       # One retry: a single failed TLS data connection (seen once in ~1000 uploads on iwx41)
       # otherwise fails the whole deploy. FTP-Deploy-Action saves its sync state only at the
       # end, so the retry uploads again everything that changed since the last successful deploy.
@@ -501,6 +583,7 @@ jobs:
           exclude: ${{ steps.exclude.outputs.list }}
           local-dir: ${{ inputs.ftp_local_dir }}
           server-dir: ${{ env.FTP_REMOTE_PATH_NORMALIZED }}
+          state-name: .htcrservers-deploy-state.json
           log-level: ${{ inputs.dry_run && 'verbose' || inputs.ftp_log_level }}
           dry-run: ${{ inputs.dry_run }}
           dangerous-clean-slate: ${{ inputs.clean_deploy }}
@@ -525,6 +608,7 @@ jobs:
           exclude: ${{ steps.exclude.outputs.list }}
           local-dir: ${{ inputs.ftp_local_dir }}
           server-dir: ${{ env.FTP_REMOTE_PATH_NORMALIZED }}
+          state-name: .htcrservers-deploy-state.json
           log-level: ${{ inputs.dry_run && 'verbose' || inputs.ftp_log_level }}
           dry-run: ${{ inputs.dry_run }}
           dangerous-clean-slate: ${{ inputs.clean_deploy }}
