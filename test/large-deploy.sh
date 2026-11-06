@@ -163,10 +163,33 @@ rm -f "$srv/site/p/1/index.html"
 chmod a-w "$srv/site/p/1"
 rc=0; CRS_BATCH_ABOVE_SECONDS=0 batches 0 90 > "$tmp/refused.out" 2>&1 || rc=$?
 chmod u+w "$srv/site/p/1"
-check "a refused file fails the run with a clear message" '[ "$rc" -eq 1 ] && grep -q "::error::The upload did not finish: p/1/index.html failed 3 times" "$tmp/refused.out"'
-check "the other files in the batches still arrive" '[ "$(grep -rl "v3" "$srv/site/p" | wc -l | tr -d " ")" -gt 0 ]'
+check "a refused file fails the run with a clear message" '[ "$rc" -eq 1 ] && grep -q "::error::The upload did not finish: p/1/index.html failed 3 times" "$tmp/refused.out" && grep -q "Progress is saved" "$tmp/refused.out"'
+check "a refused file stops the batch instead of trying every other file" '[ "$(grep -c "Uploaded " "$tmp/refused.out")" -eq 3 ]'
 refused_hash=$(python3 -c 'import json,sys; print({i["name"]: i for i in json.load(open(sys.argv[1]))["data"]}["p/1/index.html"]["hash"])' "$srv/site/$STATE")
 check "the state does not claim the refused file arrived" '[ "$refused_hash" != "$(python3 -c "import hashlib; print(hashlib.sha256(open(\"out/p/1/index.html\", \"rb\").read()).hexdigest())")" ]'
+
+# --- the server refuses renames: progress is still saved --------------------------------------
+action true > /dev/null 2>&1
+touch "$log.refuse-rename"
+: > "$GITHUB_OUTPUT"
+CRS_BATCH_ABOVE_SECONDS=0 batches 0 90 > "$tmp/norename.out" 2>&1
+rm -f "$log.refuse-rename"
+check "a refused rename falls back to overwriting the state" 'grep -q "All .* changed files are on the server" "$tmp/norename.out" && grep -q "^sent=true" "$GITHUB_OUTPUT" && python3 -c "import hashlib,json,sys; d={i[\"name\"]:i for i in json.load(open(sys.argv[1]))[\"data\"]}; assert d[\"p/2/index.html\"][\"hash\"]==hashlib.sha256(open(\"out/p/2/index.html\",\"rb\").read()).hexdigest()" "$srv/site/$STATE"'
+
+# --- a state the step can't use counts as a first publish, as in the action -------------------
+for bad in '{}' '[]' '{"data":[{"name":"x"}]}' 'not json'; do
+  printf '%s' "$bad" > "$srv/site/$STATE"
+  action true > /dev/null 2>&1
+  : > "$GITHUB_STEP_SUMMARY"
+  rc=0; batches 0 90 true > "$tmp/badstate.out" 2>&1 || rc=$?
+  check "state '$bad' counts every file as changed" '[ "$rc" -eq 0 ] && grep -q "::warning::The sync state on the server can.t be read" "$tmp/badstate.out" && grep -q "### Dry run: $(( PAGES + 3 )) of " "$GITHUB_STEP_SUMMARY"'
+done
+
+# --- deploy_timeout_minutes is validated ------------------------------------------------------
+step "Check FTP secrets" secrets.sh
+limit() { GITHUB_ENV="$tmp/github_env" FTP_REMOTE_PATH=site/ BACKEND=false CLEAN_DEPLOY=false ENVIRONMENT="" PROTECTED_PATHS="" DEPLOY_TIMEOUT=$1 bash "$tmp/secrets.sh" > "$tmp/limit.out" 2>&1; }
+for value in 20 90 360; do check "limit $value is accepted" "limit $value"; done
+for value in 19 361 abc 90.5 ''; do check "limit '$value' is refused" "! limit '$value' && grep -q '::error::deploy_timeout_minutes' \"\$tmp/limit.out\""; done
 
 # --- small site: the new steps stay out of the way -------------------------------------------
 mkdir -p small/a; echo hi > small/a/index.html
@@ -180,6 +203,8 @@ summary env FTP_OUTCOME=cancelled FTP_RETRY_OUTCOME=skipped BATCHES_OUTCOME=skip
 check "a limit during the action says a re-run starts over" 'grep -q "## Upload did not finish" "$GITHUB_STEP_SUMMARY" && grep -q "a re-run starts over" "$GITHUB_STEP_SUMMARY" && grep -q "deploy_timeout_minutes" "$GITHUB_STEP_SUMMARY" && grep -q "::error::The upload did not finish" "$tmp/sum.out"'
 summary env FTP_OUTCOME="" FTP_RETRY_OUTCOME="" BATCHES_OUTCOME=cancelled
 check "a limit during the batches says a re-run continues" 'grep -q "a re-run continues" "$GITHUB_STEP_SUMMARY" && ! grep -q "starts over" "$GITHUB_STEP_SUMMARY"'
+summary env FTP_OUTCOME=cancelled FTP_RETRY_OUTCOME=skipped BATCHES_OUTCOME=success BATCHES_SENT=true
+check "a limit after the batches says only the final pass is left" 'grep -q "only has to delete" "$GITHUB_STEP_SUMMARY" && ! grep -q "starts over" "$GITHUB_STEP_SUMMARY"'
 summary env FTP_OUTCOME=success FTP_RETRY_OUTCOME="" BATCHES_OUTCOME=""
 check "a finished deploy has no such message" '! grep -q "did not finish" "$GITHUB_STEP_SUMMARY" && grep -q "Job time limit:\*\* 90" "$GITHUB_STEP_SUMMARY"'
 

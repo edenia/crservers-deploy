@@ -23,6 +23,13 @@ class Handler(TLS_FTPHandler):
     def on_file_received(self, file):
         self._log("STOR " + file[len(root):].lstrip("/"))
 
+    def ftp_RNFR(self, path):
+        # Lets the test check the fallback for a server that refuses renames.
+        if os.path.exists(log_path + ".refuse-rename"):
+            self.respond("550 Rename refused.")
+            return None
+        return super().ftp_RNFR(path)
+
     def ftp_DELE(self, path):
         self._log("DELE " + path[len(root):].lstrip("/"))
         return super().ftp_DELE(path)

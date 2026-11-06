@@ -596,7 +596,7 @@ jobs:
         run: |
           set -euo pipefail
           files=$(find "$LOCAL_DIR" -type f | wc -l)
-          bytes=$(find "$LOCAL_DIR" -type f -exec cat {} + | wc -c)
+          bytes=$(find "$LOCAL_DIR" -type f -ls | awk '{ s += $7 } END { printf "%.0f", s }')
           seconds=$(( files / CRS_FILES_PER_SECOND + bytes / CRS_BYTES_PER_SECOND ))
           echo "Upload folder: $files files, $bytes bytes; at most about $(( seconds / 60 )) minutes if all of it changed."
           if [ "$seconds" -gt "$CRS_BATCH_ABOVE_SECONDS" ]; then echo "large=true" >> "$GITHUB_OUTPUT"; else echo "large=false" >> "$GITHUB_OUTPUT"; fi
@@ -706,7 +706,8 @@ jobs:
               fd = os.open(base_cfg, os.O_WRONLY | os.O_CREAT, 0o600)
               with os.fdopen(fd, "w", encoding="utf-8") as out:
                   out.write("user = " + cfg_quote(env["FTP_USER"] + ":" + env["FTP_PASSWORD"]) + "\n")
-                  out.write("silent\nshow-error\ngloboff\nconnect-timeout = 30\nftp-create-dirs\n")
+                  # fail-early: if the server goes away, don't wait out every remaining file in the batch.
+                  out.write("silent\nshow-error\ngloboff\nfail-early\nconnect-timeout = 30\nftp-create-dirs\n")
                   out.write("speed-limit = 1\nspeed-time = " + str(max(30, int(env["FTP_TIMEOUT_MS"]) // 1000)) + "\n")
                   if env["FTP_PROTOCOL"] == "ftps":
                       out.write("ssl-reqd\n")
@@ -723,10 +724,16 @@ jobs:
               got = curl("-o", state_path, remote_url(state_name))
               server = {"description": local.get("description", ""), "version": local.get("version", "1.0.0"), "generatedTime": local.get("generatedTime", 0), "data": []}
               if got.returncode == 0:
+                  # Like the action, treat a state it can't use as a first publish.
+                  loaded = None
                   try:
                       with open(state_path, encoding="utf-8") as src:
-                          server = json.load(src)
+                          loaded = json.load(src)
                   except ValueError:
+                      pass
+                  if isinstance(loaded, dict) and isinstance(loaded.get("data"), list) and all(isinstance(i, dict) and "name" in i and "type" in i for i in loaded["data"]):
+                      server = loaded
+                  else:
                       say("::warning::The sync state on the server can't be read, so every file counts as changed.")
               elif got.returncode not in (78, 9):
                   say("::warning::Could not read the sync state (curl exit " + str(got.returncode) + ": " + got.stderr[:200].strip() + "). The upload goes ahead the usual way, which can't resume if it outlasts the job.")
@@ -765,7 +772,7 @@ jobs:
                   summary(f"### Dry run: {total} of {len(files)} files would upload (about {minutes(estimate)} minutes; job limit {limit_minutes} minutes)")
                   sys.exit(0)
 
-              if estimate <= int(env["CRS_BATCH_ABOVE_SECONDS"]):
+              if estimate <= int(env["CRS_BATCH_ABOVE_SECONDS"]) and not too_long:
                   say("Small enough for the usual upload.")
                   sys.exit(0)
 
@@ -775,7 +782,7 @@ jobs:
                   leave a truncated state on the server, which would make every file count as new."""
                   server["data"] = sorted(entries.values(), key=lambda item: item["name"])
                   with open(state_path, "w", encoding="utf-8") as out:
-                      json.dump(server, out, indent=4)
+                      json.dump(server, out)
                   temp_name = state_name + ".tmp"
                   sent = curl("-T", state_path, remote_url(temp_name))
                   if sent.returncode == 0:
@@ -790,7 +797,8 @@ jobs:
 
 
               def upload(batch):
-                  """Send a batch over one connection. Returns the items that did not arrive."""
+                  """Send a batch over one connection. Returns the items that did not arrive, first the one
+                  that failed, then the ones curl did not try after it."""
                   cfg = os.path.join(work, "batch.cfg")
                   with open(cfg, "w", encoding="utf-8") as out:
                       out.write('write-out = "%{urlnum} %{exitcode}\\n"\n')
@@ -810,12 +818,16 @@ jobs:
 
               def finish_unfinished(reason):
                   left = len(pending)
-                  say(f"::error::The upload did not finish: {reason} {total - left} of {total} changed files were sent. Progress is saved: re-run the failed job and it continues from there.")
+                  if saved or save_state():
+                      resume = "Progress is saved: re-run the failed job and it continues from there."
+                  else:
+                      resume = "The latest progress could not be saved: re-run the failed job and it continues from the last saved batch, so some files are sent again."
+                  say(f"::error::The upload did not finish: {reason} {total - left} of {total} changed files were sent. {resume}")
                   summary(
                       "### Upload did not finish",
                       f"{reason} {total - left} of {total} changed files were sent; {left} are still the old version or missing on the server. Files that left the site have not been deleted.",
                       "",
-                      "Progress is saved. **Re-run the failed job** and it continues from there. Raise `deploy_timeout_minutes` to finish a change this size in one run.",
+                      f"{resume} Raise `deploy_timeout_minutes` to finish a change this size in one run.",
                   )
                   sys.exit(1)
 
@@ -847,16 +859,17 @@ jobs:
                   say(f"Uploaded {sent} of {total} files ({rate:.0f} files a minute).")
                   if failed:
                       pending[:0] = failed
-                      for item in failed:
-                          tries[item["name"]] = tries.get(item["name"], 0) + 1
-                      worst = max(failed, key=lambda item: tries[item["name"]])
-                      if tries[worst["name"]] >= MAX_TRIES:
-                          finish_unfinished(f"{worst['name']} failed {MAX_TRIES} times.")
+                      culprit = failed[0]["name"]
+                      tries[culprit] = tries.get(culprit, 0) + 1
+                      if tries[culprit] >= MAX_TRIES:
+                          finish_unfinished(f"{culprit} failed {MAX_TRIES} times.")
                       time.sleep(20)
 
               if not saved and not save_state():
                   finish_unfinished("the last progress could not be saved.")
               say(f"All {total} changed files are on the server.")
+              with open(env["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+                  out.write("sent=true\n")
               summary(f"### Large upload: {total} files sent in batches, progress saved after each batch")
 
       # One retry: a single failed TLS data connection (seen once in ~1000 uploads on iwx41)
@@ -930,6 +943,7 @@ jobs:
           FTP_OUTCOME: ${{ steps.ftp.outcome }}
           FTP_RETRY_OUTCOME: ${{ steps.ftp_retry.outcome }}
           BATCHES_OUTCOME: ${{ steps.batches.outcome }}
+          BATCHES_SENT: ${{ steps.batches.outputs.sent }}
           DEPLOY_TIMEOUT: ${{ inputs.deploy_timeout_minutes }}
           BACKEND: ${{ inputs.backend }}
           ENVIRONMENT: ${{ inputs.environment }}
@@ -943,6 +957,8 @@ jobs:
               echo "The job was cancelled, or reached its limit of ${DEPLOY_TIMEOUT} minutes, during the upload. The server now has a mix of old and new files."
               if [ "$BATCHES_OUTCOME" = "cancelled" ]; then
                 echo "Progress was saved after each batch, so a re-run continues from the last saved batch."
+              elif [ "$BATCHES_SENT" = "true" ]; then
+                echo "All changed files were already sent and saved in batches, so a re-run only has to delete what left the site and write the final state."
               else
                 echo "FTP-Deploy-Action saves its sync state only when it finishes, so **a re-run starts over** and sends every file changed since the last finished deploy."
                 if [ "$CLEAN_DEPLOY" = "true" ]; then echo "clean_deploy emptied the folder first: run the deploy again to restore the site."; fi

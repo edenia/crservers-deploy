@@ -540,6 +540,8 @@ with:
 
 `clean_deploy` can't resume: it empties the folder and hands the whole upload to the action, so a run that hits the limit starts over. The run warns up front when that's expected. The same applies to any upload the action is running when the limit hits; the job summary says so.
 
+Deletes aren't saved along the way or counted in the estimate. A change that removes tens of thousands of files can reach the limit in the action's final pass; a re-run repeats the deletes and skips files already gone. If it can't finish within the limit, raise `deploy_timeout_minutes`.
+
 `dry_run: true` reports how many files would upload and whether that fits the limit, without changing anything.
 
 `test/large-deploy.sh` runs all of this against a local FTPS server with the real action.
