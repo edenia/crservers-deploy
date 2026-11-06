@@ -24,10 +24,13 @@ jobs:
           ./actionlint -color
 
       - name: shellcheck
-        run: shellcheck static-site-contact/install-on-server.sh test/run-checks.sh test/contact-config-order.sh test/stubs/curl
+        run: shellcheck static-site-contact/install-on-server.sh test/run-checks.sh test/contact-config-order.sh test/large-deploy.sh test/stubs/curl
 
       - name: Deploy safety checks (fixtures)
         run: bash test/run-checks.sh
+
+      - name: Large deploy against a local FTPS server
+        run: bash test/large-deploy.sh
 
       - name: PHP syntax
         run: |

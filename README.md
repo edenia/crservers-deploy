@@ -141,6 +141,7 @@ Available starting with the `ftp_log_level` input (not present in workflow revis
 | `ftp_protocol` | `ftps` | |
 | `ftp_local_dir` | `./out/` | Must end with `/` |
 | `ftp_timeout_ms` | `1200000` | |
+| `deploy_timeout_minutes` | `90` | Time limit for the deploy job, 20 to 360 (GitHub's maximum). See [Large deploys](#large-deploys) |
 | `ftp_log_level` | `standard` | FTP-Deploy-Action log verbosity for real deploys - `minimal`\|`standard`\|`verbose`. Set to `verbose` to get the full FTP command/response transcript for a real (non-dry-run) deploy, e.g. to correlate against server-side FTP logs. `dry_run: true` always forces `verbose` regardless of this input. |
 | `dry_run` | `false` | FTP no-op |
 | `clean_deploy` | `false` | Wipes remote `FTP_REMOTE_PATH` |
@@ -212,6 +213,7 @@ Some accounts use `domains/DOMAIN/html/` instead of `DOMAIN/html/`. Always take 
 | `ERR_TLS_CERT_ALTNAME_INVALID`, or the action says "are you sure your server works via FTP or FTPS? … SFTP" | `FTP_HOST` is your domain or an IP, so the FTPS certificate (issued to the server hostname) doesn't match. Set it to the server hostname, e.g. `iwx41.crservers.com`. Ignore the SFTP hint: CR Servers uses FTPS. The run ends with an `::error::` saying so |
 | First deploy to a folder fails with `read ECONNRESET (data socket)` right after "No file exists on the server … first publish" (before v2.0.2) | The action's download of the missing sync-state file fails (550) and breaks its FTPS session on iwx41. Since v2.0.2 the "Prepare sync state" step creates the state file first (own connection), so the action never hits that path |
 | A deploy shows "The FTP upload failed; retrying once" (e.g. `ERR_SSL_TLSV1_ALERT_DECODE_ERROR` on the data socket) and then succeeds | A single TLS data connection failed during a large upload (seen once in ~1000 files on iwx41). The workflow retries the upload once; the retry re-sends every file changed since the last successful deploy, because FTP-Deploy-Action saves its sync state only at the end. If both attempts fail, run the job again |
+| The deploy job fails with "The upload did not finish", or shows `cancelled` at the job limit | The change was too large for `deploy_timeout_minutes`. The job summary says whether a re-run continues or starts over. See [Large deploys](#large-deploys) |
 | `ECONNRESET (data socket)` persists with `FTP_REMOTE_PATH` already correct (`/`, no leading `./`), and `ftp_log_level: verbose` shows no FTP command/response transcript at all | `log-level: verbose` only prints FTP-Deploy-Action's own sync-decision logging (“creating folder X”, “uploading file Y”) — it does **not** expose the underlying `basic-ftp` library's raw protocol trace. See [FTP protocol diagnostics](#ftp-protocol-diagnostics) below for a standalone workflow that does |
 
 **Verify the correct folder:** after deploy, `index.html` in the domain `html/` should be small (static export) and include `_next/`. Check the public URL `Last-Modified` or page title changes.
@@ -517,6 +519,30 @@ Both write to the same folder, so pick one per site. Each deploy uploads **`.htc
 - **CR Servers Deploy overwrites whatever is in the repo**, including changes an assistant published, on the next push.
 
 If a site moves from one to the other, say so in the repo README, and stop the deploy workflow (or remove AI Connect's access in the client area) for the tool you no longer use.
+
+## Large deploys
+
+FTPS sends about 120 files a minute on iwx41, because each file needs its own encrypted data connection. A change to 12,000 pages takes about 100 minutes.
+
+FTP-Deploy-Action saves its sync state only when it finishes. Above about 10 minutes of estimated upload (1,200 files, or less with large files), the workflow therefore sends the change in batches first and saves the state on the server after each batch of 250 files:
+
+1. **Measure the upload.** If the whole upload folder would take under about 10 minutes, the two steps below are skipped and the deploy runs as it always has.
+2. **List files for a large upload.** A dry run of the action writes its own file list, with the exclude rules applied. The batch step uploads only from that list, so `private/**`, `.env` files and `protected_paths` stay out the same way as in any other deploy.
+3. **Upload large change in batches.** New files go first, then replaced ones. Nothing is deleted yet, so pages keep working while the upload is partial.
+4. **Deploy via FTP.** The action finds those files already in place, deletes what left the site and writes the final state.
+
+If the change can't fit, the run warns at the start. It stops about 10 minutes before the limit, fails with "The upload did not finish" and reports how many files were sent. **Re-run the failed job** (or push again) to continue; files already sent are not sent again. To finish in one run, raise the limit:
+
+```yaml
+with:
+  deploy_timeout_minutes: 180
+```
+
+`clean_deploy` can't resume: it empties the folder and hands the whole upload to the action, so a run that hits the limit starts over. The run warns up front when that's expected. The same applies to any upload the action is running when the limit hits; the job summary says so.
+
+`dry_run: true` reports how many files would upload and whether that fits the limit, without changing anything.
+
+`test/large-deploy.sh` runs all of this against a local FTPS server with the real action.
 
 ## Versioning
 
