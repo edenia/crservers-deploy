@@ -65,6 +65,11 @@ on:
         type: number
         required: false
         default: 1200000
+      deploy_timeout_minutes:
+        description: Time limit for the deploy job, 20 to 360 minutes (GitHub's maximum). A change too large for the limit stops cleanly before it and continues on a re-run; raise this to finish it in one run.
+        type: number
+        required: false
+        default: 90
       ftp_log_level:
         description: FTP-Deploy-Action log-level for real (non-dry-run) deploys - minimal|standard|verbose. Use verbose to correlate a run against server-side FTP/TLS logs. dry_run always forces verbose regardless of this input.
         type: string
@@ -369,11 +374,20 @@ jobs:
     runs-on: ubuntu-latest
     needs: build
     environment: ${{ inputs.environment }}
-    # Room for two full uploads (the first attempt and its retry), so a late failure's retry isn't cut off.
-    timeout-minutes: 90
+    # The default leaves room for two ordinary uploads (the first attempt and its retry). A change
+    # too large for this limit goes through "Upload large change in batches", which can resume.
+    timeout-minutes: ${{ inputs.deploy_timeout_minutes }}
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+      # Rough upload speed, measured on iwx41 (about 120 files a minute). Only used for estimates.
+      CRS_FILES_PER_SECOND: 2
+      CRS_BYTES_PER_SECOND: 5242880
+      # Changes estimated above this go through the resumable batch upload.
+      CRS_BATCH_ABOVE_SECONDS: 600
     steps:
+      - name: Note the start time
+        run: echo "CRS_JOB_STARTED=$(date +%s)" >> "$GITHUB_ENV"
+
       - name: Download site artifact
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -407,9 +421,16 @@ jobs:
           CLEAN_DEPLOY: ${{ inputs.clean_deploy }}
           ENVIRONMENT: ${{ inputs.environment }}
           PROTECTED_PATHS: ${{ inputs.protected_paths }}
+          DEPLOY_TIMEOUT: ${{ inputs.deploy_timeout_minutes }}
         run: |
           set -e
           missing=0
+          case "$DEPLOY_TIMEOUT" in
+            ''|*[!0-9]*) echo "::error::deploy_timeout_minutes must be a whole number from 20 to 360 (got '$DEPLOY_TIMEOUT')."; missing=1 ;;
+            *) if [ "$DEPLOY_TIMEOUT" -lt 20 ] || [ "$DEPLOY_TIMEOUT" -gt 360 ]; then
+                 echo "::error::deploy_timeout_minutes must be from 20 to 360 (got '$DEPLOY_TIMEOUT'). GitHub stops a job at 360 minutes."; missing=1
+               fi ;;
+          esac
           for v in FTP_HOST FTP_USER FTP_PASSWORD FTP_REMOTE_PATH; do
             eval "val=\${$v}"
             if [ -z "$val" ]; then echo "::error::Missing secret: $v"; missing=1; fi
@@ -567,6 +588,290 @@ jobs:
             fi
           fi
 
+      # A small site can't outlast the job, so it skips the two steps below and deploys exactly as before.
+      - name: Measure the upload
+        id: size
+        env:
+          LOCAL_DIR: ${{ inputs.ftp_local_dir }}
+        run: |
+          set -euo pipefail
+          files=$(find "$LOCAL_DIR" -type f | wc -l)
+          bytes=$(find "$LOCAL_DIR" -type f -ls | awk '{ s += $7 } END { printf "%.0f", s }')
+          seconds=$(( files / CRS_FILES_PER_SECOND + bytes / CRS_BYTES_PER_SECOND ))
+          echo "Upload folder: $files files, $bytes bytes; at most about $(( seconds / 60 )) minutes if all of it changed."
+          if [ "$seconds" -gt "$CRS_BATCH_ABOVE_SECONDS" ]; then echo "large=true" >> "$GITHUB_OUTPUT"; else echo "large=false" >> "$GITHUB_OUTPUT"; fi
+
+      # A dry run of the action writes its own file list (exclude rules applied, sha256 hashes) to
+      # <local dir>/<state name>, even if the connection fails afterwards. The batch step uploads
+      # only from that list, so it can never send a file the action itself would have left out.
+      - name: List files for a large upload
+        if: ${{ steps.size.outputs.large == 'true' }}
+        continue-on-error: true
+        uses: SamKirkland/FTP-Deploy-Action@3a9c65ae0fc12ac924ccef8afc26941cc43aad0b # v4.4.0
+        with:
+          server: ${{ secrets.FTP_HOST }}
+          username: ${{ secrets.FTP_USER }}
+          password: ${{ secrets.FTP_PASSWORD }}
+          protocol: ${{ inputs.ftp_protocol }}
+          security: ${{ inputs.ftp_security }}
+          exclude: ${{ steps.exclude.outputs.list }}
+          local-dir: ${{ inputs.ftp_local_dir }}
+          server-dir: ${{ env.FTP_REMOTE_PATH_NORMALIZED }}
+          state-name: .htcrservers-deploy-state.json
+          log-level: minimal
+          dry-run: true
+          timeout: ${{ inputs.ftp_timeout_ms }}
+
+      # FTP-Deploy-Action saves its sync state only at the end, so an upload that outlasts the job
+      # keeps the old state and starts from zero on every run. This step sends a large change first,
+      # in batches, and saves the state on the server after each batch. New files go before
+      # replaced ones and nothing is deleted, so pages keep working during a partial upload. The
+      # action then runs as usual: it finds the files already in place, deletes what is no longer
+      # in the site and writes the final state.
+      - name: Upload large change in batches
+        id: batches
+        if: ${{ steps.size.outputs.large == 'true' }}
+        shell: python3 {0}
+        env:
+          FTP_HOST: ${{ secrets.FTP_HOST }}
+          FTP_USER: ${{ secrets.FTP_USER }}
+          FTP_PASSWORD: ${{ secrets.FTP_PASSWORD }}
+          FTP_PROTOCOL: ${{ inputs.ftp_protocol }}
+          FTP_SECURITY: ${{ inputs.ftp_security }}
+          FTP_TIMEOUT_MS: ${{ inputs.ftp_timeout_ms }}
+          LOCAL_DIR: ${{ inputs.ftp_local_dir }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          CLEAN_DEPLOY: ${{ inputs.clean_deploy }}
+          DEPLOY_TIMEOUT: ${{ inputs.deploy_timeout_minutes }}
+          STATE_NAME: .htcrservers-deploy-state.json
+        run: |
+          import json, os, subprocess, sys, tempfile, time, urllib.parse
+
+          BATCH_FILES = 250
+          BATCH_BYTES = 256 * 1024 * 1024
+          MAX_TRIES = 3
+          # Left for the action's final pass (hashing, deletes, final state) and the job summary.
+          RESERVE_SECONDS = 600
+
+          env = os.environ
+          state_name = env["STATE_NAME"]
+          local_dir = env["LOCAL_DIR"]
+          remote_dir = env["FTP_REMOTE_PATH_NORMALIZED"].lstrip("/")
+          dry_run = env["DRY_RUN"] == "true"
+          clean_deploy = env["CLEAN_DEPLOY"] == "true"
+          limit_minutes = int(env["DEPLOY_TIMEOUT"])
+          deadline = int(env["CRS_JOB_STARTED"]) + limit_minutes * 60 - RESERVE_SECONDS
+          host = "ftps://" + env["FTP_HOST"] if env["FTP_PROTOCOL"] == "ftps-legacy" else "ftp://" + env["FTP_HOST"]
+
+
+          def say(line):
+              print(line, flush=True)
+
+
+          def summary(*lines):
+              with open(env["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as out:
+                  out.write("\n".join(lines) + "\n")
+
+
+          def estimate_seconds(items):
+              return len(items) / int(env["CRS_FILES_PER_SECOND"]) + sum(i["size"] for i in items) / int(env["CRS_BYTES_PER_SECOND"])
+
+
+          def minutes(seconds):
+              return max(1, round(seconds / 60))
+
+
+          def cfg_quote(value):
+              return '"' + value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t") + '"'
+
+
+          def remote_url(name):
+              return host + "/" + urllib.parse.quote(remote_dir + name, safe="/")
+
+
+          # The action's file list. Moved out of the upload folder, so it never lists itself.
+          listing = local_dir + state_name
+          if not os.path.exists(listing):
+              say("::warning::Could not list the files for a large upload. The upload goes ahead the usual way, which can't resume if it outlasts the job.")
+              sys.exit(0)
+
+          with tempfile.TemporaryDirectory(dir=env["RUNNER_TEMP"]) as work:
+              os.chmod(work, 0o700)
+              with open(listing, encoding="utf-8") as src:
+                  local = json.load(src)
+              os.remove(listing)
+
+              # Same settings as "Prepare sync state". Credentials stay out of the command line.
+              base_cfg = os.path.join(work, "base.cfg")
+              fd = os.open(base_cfg, os.O_WRONLY | os.O_CREAT, 0o600)
+              with os.fdopen(fd, "w", encoding="utf-8") as out:
+                  out.write("user = " + cfg_quote(env["FTP_USER"] + ":" + env["FTP_PASSWORD"]) + "\n")
+                  # fail-early: if the server goes away, don't wait out every remaining file in the batch.
+                  out.write("silent\nshow-error\ngloboff\nfail-early\nconnect-timeout = 30\nftp-create-dirs\n")
+                  out.write("speed-limit = 1\nspeed-time = " + str(max(30, int(env["FTP_TIMEOUT_MS"]) // 1000)) + "\n")
+                  if env["FTP_PROTOCOL"] == "ftps":
+                      out.write("ssl-reqd\n")
+                  if env["FTP_SECURITY"] == "loose":
+                      out.write("insecure\n")
+
+
+              def curl(*args):
+                  return subprocess.run(["curl", "-K", base_cfg, *args], capture_output=True, text=True, errors="replace", check=False)
+
+
+              # What is on the server now. curl 78: no state yet. 9: the folder doesn't exist yet.
+              state_path = os.path.join(work, "state.json")
+              got = curl("-o", state_path, remote_url(state_name))
+              server = {"description": local.get("description", ""), "version": local.get("version", "1.0.0"), "generatedTime": local.get("generatedTime", 0), "data": []}
+              if got.returncode == 0:
+                  # Like the action, treat a state it can't use as a first publish.
+                  loaded = None
+                  try:
+                      with open(state_path, encoding="utf-8") as src:
+                          loaded = json.load(src)
+                  except ValueError:
+                      pass
+                  if isinstance(loaded, dict) and isinstance(loaded.get("data"), list) and all(isinstance(i, dict) and "name" in i and "type" in i for i in loaded["data"]):
+                      server = loaded
+                  else:
+                      say("::warning::The sync state on the server can't be read, so every file counts as changed.")
+              elif got.returncode not in (78, 9):
+                  say("::warning::Could not read the sync state (curl exit " + str(got.returncode) + ": " + got.stderr[:200].strip() + "). The upload goes ahead the usual way, which can't resume if it outlasts the job.")
+                  sys.exit(0)
+
+              # Same comparison as the action: new files, then files whose hash changed.
+              entries = {item["name"]: item for item in server["data"]}
+              local_items = {item["name"]: item for item in local["data"]}
+              files = [item for item in local["data"] if item["type"] == "file" and item["name"] != state_name]
+              new = [item for item in files if item["name"] not in entries]
+              replaced = [item for item in files if item["name"] in entries and entries[item["name"]]["type"] == "file" and entries[item["name"]].get("hash") != item["hash"]]
+              pending = new + replaced
+              if clean_deploy:
+                  pending = files  # clean_deploy empties the folder first, so all of it uploads.
+
+              total = len(pending)
+              estimate = estimate_seconds(pending)
+              budget = deadline - time.time()
+              say(f"Changed: {total} of {len(files)} files. Estimated upload: about {minutes(estimate)} minutes. Job limit: {limit_minutes} minutes.")
+              too_long = estimate > max(budget, 0)
+
+              if clean_deploy:
+                  # A clean deploy deletes the state with everything else, so it can't be split up.
+                  if too_long:
+                      say(f"::warning::clean_deploy needs to upload {total} files (about {minutes(estimate)} minutes) but the job stops at {limit_minutes} minutes. It can't resume: the site stays partly uploaded and a re-run starts over. Raise deploy_timeout_minutes or deploy without clean_deploy.")
+                      summary(f"### Large upload: won't fit the job limit", f"clean_deploy needs about {minutes(estimate)} minutes for {total} files; the limit is {limit_minutes} minutes and it can't resume. Raise `deploy_timeout_minutes`.")
+                  sys.exit(0)
+
+              if too_long:
+                  warning = f"{total} changed files need about {minutes(estimate)} minutes; the upload has about {minutes(max(budget, 0))} of this job's {limit_minutes} minutes."
+                  advice = "It will stop before the limit and save its progress. Re-run the failed job to continue, or raise deploy_timeout_minutes to finish in one run."
+                  say("::warning::" + warning + " " + advice)
+                  summary("### Large upload: won't fit in one run", warning, advice)
+
+              if dry_run:
+                  summary(f"### Dry run: {total} of {len(files)} files would upload (about {minutes(estimate)} minutes; job limit {limit_minutes} minutes)")
+                  sys.exit(0)
+
+              if estimate <= int(env["CRS_BATCH_ABOVE_SECONDS"]) and not too_long:
+                  say("Small enough for the usual upload.")
+                  sys.exit(0)
+
+
+              def save_state():
+                  """Write the state under a temporary name and rename it: a cut-off upload must not
+                  leave a truncated state on the server, which would make every file count as new."""
+                  server["data"] = sorted(entries.values(), key=lambda item: item["name"])
+                  with open(state_path, "w", encoding="utf-8") as out:
+                      json.dump(server, out)
+                  temp_name = state_name + ".tmp"
+                  sent = curl("-T", state_path, remote_url(temp_name))
+                  if sent.returncode == 0:
+                      moved = curl("-o", os.devnull, "-Q", "RNFR " + remote_dir + temp_name, "-Q", "RNTO " + remote_dir + state_name, host + "/")
+                      if moved.returncode == 0:
+                          return True
+                  # The server refused the rename: overwrite directly.
+                  sent = curl("-T", state_path, remote_url(state_name))
+                  if sent.returncode != 0:
+                      say("::warning::Could not save progress (" + sent.stderr[:200].strip() + "). Trying again after the next batch.")
+                  return sent.returncode == 0
+
+
+              def upload(batch):
+                  """Send a batch over one connection. Returns the items that did not arrive, first the one
+                  that failed, then the ones curl did not try after it."""
+                  cfg = os.path.join(work, "batch.cfg")
+                  with open(cfg, "w", encoding="utf-8") as out:
+                      out.write('write-out = "%{urlnum} %{exitcode}\\n"\n')
+                      for item in batch:
+                          out.write("url = " + cfg_quote(remote_url(item["name"])) + "\n")
+                          out.write("upload-file = " + cfg_quote(os.path.abspath(local_dir + item["name"])) + "\n")
+                  done = curl("-K", cfg)
+                  arrived = set()
+                  for line in done.stdout.splitlines():
+                      num, _, code = line.partition(" ")
+                      if code == "0":
+                          arrived.add(int(num))
+                  if len(arrived) < len(batch) and done.stderr.strip():
+                      say("curl: " + done.stderr.strip()[:500])
+                  return [item for index, item in enumerate(batch) if index not in arrived]
+
+
+              def finish_unfinished(reason):
+                  left = len(pending)
+                  if saved or save_state():
+                      resume = "Progress is saved: re-run the failed job and it continues from there."
+                  else:
+                      resume = "The latest progress could not be saved: re-run the failed job and it continues from the last saved batch, so some files are sent again."
+                  say(f"::error::The upload did not finish: {reason} {total - left} of {total} changed files were sent. {resume}")
+                  summary(
+                      "### Upload did not finish",
+                      f"{reason} {total - left} of {total} changed files were sent; {left} are still the old version or missing on the server. Files that left the site have not been deleted.",
+                      "",
+                      f"{resume} Raise `deploy_timeout_minutes` to finish a change this size in one run.",
+                  )
+                  sys.exit(1)
+
+
+              tries = {}
+              started = time.time()
+              saved = True
+              while pending:
+                  if time.time() >= deadline:
+                      finish_unfinished(f"it stopped before the job's {limit_minutes}-minute limit.")
+                  batch, batch_bytes = [], 0
+                  while pending and len(batch) < BATCH_FILES and (not batch or batch_bytes + pending[0]["size"] <= BATCH_BYTES):
+                      batch.append(pending.pop(0))
+                      batch_bytes += batch[-1]["size"]
+                  failed = upload(batch)
+                  failed_names = {item["name"] for item in failed}
+                  for item in batch:
+                      if item["name"] in failed_names:
+                          continue
+                      entries[item["name"]] = item
+                      # curl created the parent folders; record them so the action doesn't redo each one.
+                      parent = item["name"].rpartition("/")[0]
+                      while parent and parent not in entries:
+                          entries[parent] = local_items.get(parent, {"type": "folder", "name": parent})
+                          parent = parent.rpartition("/")[0]
+                  saved = save_state()
+                  sent = total - len(pending) - len(failed)
+                  rate = sent / max(time.time() - started, 1) * 60
+                  say(f"Uploaded {sent} of {total} files ({rate:.0f} files a minute).")
+                  if failed:
+                      pending[:0] = failed
+                      culprit = failed[0]["name"]
+                      tries[culprit] = tries.get(culprit, 0) + 1
+                      if tries[culprit] >= MAX_TRIES:
+                          finish_unfinished(f"{culprit} failed {MAX_TRIES} times.")
+                      time.sleep(20)
+
+              if not saved and not save_state():
+                  finish_unfinished("the last progress could not be saved.")
+              say(f"All {total} changed files are on the server.")
+              with open(env["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+                  out.write("sent=true\n")
+              summary(f"### Large upload: {total} files sent in batches, progress saved after each batch")
+
       # One retry: a single failed TLS data connection (seen once in ~1000 uploads on iwx41)
       # otherwise fails the whole deploy. FTP-Deploy-Action saves its sync state only at the
       # end, so the retry uploads again everything that changed since the last successful deploy.
@@ -637,17 +942,38 @@ jobs:
           SITE_URL: ${{ inputs.site_url }}
           FTP_OUTCOME: ${{ steps.ftp.outcome }}
           FTP_RETRY_OUTCOME: ${{ steps.ftp_retry.outcome }}
+          BATCHES_OUTCOME: ${{ steps.batches.outcome }}
+          BATCHES_SENT: ${{ steps.batches.outputs.sent }}
+          DEPLOY_TIMEOUT: ${{ inputs.deploy_timeout_minutes }}
           BACKEND: ${{ inputs.backend }}
           ENVIRONMENT: ${{ inputs.environment }}
           FTP_SECURITY: ${{ inputs.ftp_security }}
           PROTECTED_PATHS: ${{ inputs.protected_paths }}
         run: |
+          # A job that hits timeout-minutes only shows "cancelled", so say here what that means.
+          if [ "$BATCHES_OUTCOME" = "cancelled" ] || [ "$FTP_OUTCOME" = "cancelled" ] || [ "$FTP_RETRY_OUTCOME" = "cancelled" ]; then
+            {
+              echo "## Upload did not finish"
+              echo "The job was cancelled, or reached its limit of ${DEPLOY_TIMEOUT} minutes, during the upload. The server now has a mix of old and new files."
+              if [ "$BATCHES_OUTCOME" = "cancelled" ]; then
+                echo "Progress was saved after each batch, so a re-run continues from the last saved batch."
+              elif [ "$BATCHES_SENT" = "true" ]; then
+                echo "All changed files were already sent and saved in batches, so a re-run only has to delete what left the site and write the final state."
+              else
+                echo "FTP-Deploy-Action saves its sync state only when it finishes, so **a re-run starts over** and sends every file changed since the last finished deploy."
+                if [ "$CLEAN_DEPLOY" = "true" ]; then echo "clean_deploy emptied the folder first: run the deploy again to restore the site."; fi
+              fi
+              echo "Raise \`deploy_timeout_minutes\` (up to 360) if the upload needs longer."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::The upload did not finish: the job was cancelled or reached its ${DEPLOY_TIMEOUT}-minute limit. See the job summary."
+          fi
           {
             echo "## CR Servers Deploy"
             echo "- **Event:** ${EVENT_NAME}"
             echo "- **Ref:** \`${REF}\` @ \`${SHA}\`"
             echo "- **Dry run:** ${DRY_RUN}"
             echo "- **Clean slate:** ${CLEAN_DEPLOY}"
+            echo "- **Job time limit:** ${DEPLOY_TIMEOUT} minutes"
             if [ "$FTP_OUTCOME" = "failure" ]; then echo "- **Upload:** first attempt failed, retry ${FTP_RETRY_OUTCOME}"; fi
             echo "- **Backend mode:** ${BACKEND}"
             echo "- **Environment:** ${ENVIRONMENT:-none}"
