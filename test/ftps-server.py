@@ -2,6 +2,7 @@
 """Local FTPS server for test/large-deploy.sh. Logs every finished upload and delete to a file."""
 import os
 import sys
+import time
 
 from pyftpdlib.authorizers import DummyAuthorizer
 from pyftpdlib.handlers import TLS_FTPHandler
@@ -21,6 +22,9 @@ class Handler(TLS_FTPHandler):
             out.write(line + "\n")
 
     def on_file_received(self, file):
+        # Lets the test slow uploads down, so a short time budget always runs out partway.
+        if os.path.exists(log_path + ".slow"):
+            time.sleep(0.02)
         self._log("STOR " + file[len(root):].lstrip("/"))
 
     def ftp_RNFR(self, path):
