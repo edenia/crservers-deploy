@@ -548,7 +548,7 @@ Deletes aren't saved along the way or counted in the estimate. A change that rem
 
 ## Versioning
 
-Customers pin the major tag **`v2`**. To release, tag the commit (`vX.Y.Z`) and move `v2` to it, after checking that existing inputs and secrets still work (no breaking changes within a major). Current: `v2` = `v2.0.2` (private sync state, created before the upload).
+Customers pin the major tag **`v2`**. To release, tag the commit (`vX.Y.Z`) and move `v2` to it, after checking that existing inputs and secrets still work (no breaking changes within a major). Current: `v2` = `v2.1.0` (large deploys resume after the job limit, `deploy_timeout_minutes`).
 
 **`v1` stays at `v1.4.0`** (repo then named `crservers-static-deploy`, workflow `deploy-static-site.yml`) and won't move: v1.5.0–v1.6.0 changed defaults that can stop a deploy that worked on v1.4.0, so that work ships as **v2.0.0** instead (backend hardening, `package_manager`, hidden files such as `.htaccess` deployed again, the gitleaks download warning, and the new name).
 
