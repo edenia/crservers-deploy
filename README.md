@@ -522,9 +522,9 @@ If a site moves from one to the other, say so in the repo README, and stop the d
 
 ## Large deploys
 
-FTPS sends about 120 files a minute on iwx41, because each file needs its own encrypted data connection. A change to 12,000 pages takes about 100 minutes.
+FTPS sends 50 to 120 files a minute on iwx41, depending on how far GitHub's runner is from the server, because each file needs several round trips and its own encrypted data connection. A change to 12,000 pages takes 100 to 240 minutes. The estimates below assume the slow end, 60 files a minute.
 
-FTP-Deploy-Action saves its sync state only when it finishes. Above about 10 minutes of estimated upload (1,200 files, or less with large files), the workflow therefore sends the change first, over one FTP session, and saves the state on the server every 250 files:
+FTP-Deploy-Action saves its sync state only when it finishes. Above about 10 minutes of estimated upload (600 files, or fewer with large files), the workflow therefore sends the change first, over one FTP session, and saves the state on the server every 250 files:
 
 1. **Measure the upload.** If the whole upload folder would take under about 10 minutes, the two steps below are skipped and the deploy runs as it always has.
 2. **List files for a large upload.** A dry run of the action writes its own file list, with the exclude rules applied. The batch step uploads only from that list, so `private/**`, `.env` files and `protected_paths` stay out the same way as in any other deploy.

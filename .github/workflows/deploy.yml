@@ -379,9 +379,10 @@ jobs:
     timeout-minutes: ${{ inputs.deploy_timeout_minutes }}
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-      # Rough upload speed on iwx41: about 120 files a minute for the action and 0.5-0.6 s a file
-      # for the batch step (measured 2026-11-07). Only used for estimates.
-      CRS_FILES_PER_SECOND: 2
+      # Rough upload speed, on the slow side: on iwx41 one file took 0.5 to 1.1 s depending on the
+      # runner's distance (measured 2026-11-07), for the action and the batch step alike. A low
+      # figure makes the "won't fit" warning early rather than late. Only used for estimates.
+      CRS_FILES_PER_SECOND: 1
       CRS_BYTES_PER_SECOND: 5242880
       # Changes estimated above this go through the resumable batch upload.
       CRS_BATCH_ABOVE_SECONDS: 600

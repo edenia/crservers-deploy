@@ -44,7 +44,10 @@ step "Measure the upload" measure.sh
 step "Job summary" summary.sh
 export FTP_HOST="127.0.0.1:$PORT" FTP_USER=deploy FTP_PASSWORD='pa"ss\word' FTP_PROTOCOL=ftps FTP_SECURITY=loose
 export FTP_TIMEOUT_MS=60000 LOCAL_DIR=./out/ STATE_NAME="$STATE" FTP_REMOTE_PATH_NORMALIZED=site/ RUNNER_TEMP="$tmp"
-export CRS_FILES_PER_SECOND=2 CRS_BYTES_PER_SECOND=5242880 CRS_BATCH_ABOVE_SECONDS=600
+# The estimate settings come from the workflow, so the test follows them.
+for v in CRS_FILES_PER_SECOND CRS_BYTES_PER_SECOND CRS_BATCH_ABOVE_SECONDS; do
+  export "$v=$(yq -r ".jobs.deploy.env.$v" "$WF")"
+done
 export GITHUB_STEP_SUMMARY="$tmp/summary.md" GITHUB_OUTPUT="$tmp/output"
 EXCLUDE=$'**/.git*\n**/.git*/**\n**/node_modules/**\nprivate/**\n**/.env\n**/.env.*\nuploads/**'
 
