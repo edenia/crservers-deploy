@@ -89,8 +89,8 @@ action true > "$tmp/plan.out" 2>&1
 check "the listing step uploads nothing" '[ "$(stored)" -eq 0 ]'
 check "the listing step leaves the action's file list" '[ -s "out/$STATE" ]'
 
-# The limit is 20 minutes and 10 are reserved, so 3 seconds remain: one or two batches.
-rc=0; batches $(( 600 - 3 )) 20 > "$tmp/run1.out" 2>&1 || rc=$?
+# The limit is 20 minutes and 10 are reserved, so 5 seconds remain: part of the change.
+rc=0; batches $(( 600 - 5 )) 20 > "$tmp/run1.out" 2>&1 || rc=$?
 first=$(stored)
 check "run 1 fails instead of being cut off" '[ "$rc" -eq 1 ]'
 check "run 1 warned up front that it can't fit" 'grep -q "::warning::$changed changed files need about" "$tmp/run1.out"'
@@ -118,7 +118,8 @@ check "the saved state records only what was sent ($updated)" '[ "$updated" -gt 
 # --- the re-run continues ---------------------------------------------------------------------
 : > "$GITHUB_STEP_SUMMARY"
 action true > "$tmp/plan2.out" 2>&1
-batches 0 90 > "$tmp/run2.out" 2>&1
+# How much run 1 sent depends on the machine; force the batch path so the re-run itself sends the rest.
+CRS_BATCH_ABOVE_SECONDS=0 batches 0 90 > "$tmp/run2.out" 2>&1
 second=$(stored)
 check "the re-run sent only the rest ($first + $(( second - first )) = $changed)" '[ "$second" -eq "$changed" ]'
 check "no page was sent twice" '[ "$(grep "^STOR site/p/" "$log" | sort | uniq -d | wc -l | tr -d " ")" -eq 0 ]'
@@ -161,10 +162,12 @@ check "clean_deploy warns that it can't resume" 'grep -q "::warning::clean_deplo
 action true > /dev/null 2>&1
 rm -f "$srv/site/p/1/index.html"
 chmod a-w "$srv/site/p/1"
+t0=$(date +%s)
 rc=0; CRS_BATCH_ABOVE_SECONDS=0 batches 0 90 > "$tmp/refused.out" 2>&1 || rc=$?
+took=$(( $(date +%s) - t0 ))
 chmod u+w "$srv/site/p/1"
 check "a refused file fails the run with a clear message" '[ "$rc" -eq 1 ] && grep -q "::error::The upload did not finish: p/1/index.html failed 3 times" "$tmp/refused.out" && grep -q "Progress is saved" "$tmp/refused.out"'
-check "a refused file stops the batch instead of trying every other file" '[ "$(grep -c "Uploaded " "$tmp/refused.out")" -eq 3 ]'
+check "a refused file stops the run after 3 tries (${took}s)" '[ "$took" -lt 90 ] && [ "$(grep -c "^p/1/index.html: " "$tmp/refused.out")" -eq 3 ]'
 refused_hash=$(python3 -c 'import json,sys; print({i["name"]: i for i in json.load(open(sys.argv[1]))["data"]}["p/1/index.html"]["hash"])' "$srv/site/$STATE")
 check "the state does not claim the refused file arrived" '[ "$refused_hash" != "$(python3 -c "import hashlib; print(hashlib.sha256(open(\"out/p/1/index.html\", \"rb\").read()).hexdigest())")" ]'
 
