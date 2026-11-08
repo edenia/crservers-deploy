@@ -118,7 +118,8 @@ check "the saved state records only what was sent ($updated)" '[ "$updated" -gt 
 # --- the re-run continues ---------------------------------------------------------------------
 : > "$GITHUB_STEP_SUMMARY"
 action true > "$tmp/plan2.out" 2>&1
-batches 0 90 > "$tmp/run2.out" 2>&1
+# How much run 1 sent depends on the machine; force the batch path so the re-run itself sends the rest.
+CRS_BATCH_ABOVE_SECONDS=0 batches 0 90 > "$tmp/run2.out" 2>&1
 second=$(stored)
 check "the re-run sent only the rest ($first + $(( second - first )) = $changed)" '[ "$second" -eq "$changed" ]'
 check "no page was sent twice" '[ "$(grep "^STOR site/p/" "$log" | sort | uniq -d | wc -l | tr -d " ")" -eq 0 ]'
