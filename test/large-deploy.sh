@@ -92,8 +92,11 @@ action true > "$tmp/plan.out" 2>&1
 check "the listing step uploads nothing" '[ "$(stored)" -eq 0 ]'
 check "the listing step leaves the action's file list" '[ -s "out/$STATE" ]'
 
-# The limit is 20 minutes and 10 are reserved, so 5 seconds remain: part of the change.
+# The limit is 20 minutes and 10 are reserved, so 5 seconds remain. Uploads are slowed to about
+# 20 ms a file, so 2,500 files can't fit on any machine: run 1 always stops partway.
+touch "$log.slow"
 rc=0; batches $(( 600 - 5 )) 20 > "$tmp/run1.out" 2>&1 || rc=$?
+rm -f "$log.slow"
 first=$(stored)
 check "run 1 fails instead of being cut off" '[ "$rc" -eq 1 ]'
 check "run 1 warned up front that it can't fit" 'grep -q "::warning::$changed changed files need about" "$tmp/run1.out"'
