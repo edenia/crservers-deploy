@@ -379,7 +379,8 @@ jobs:
     timeout-minutes: ${{ inputs.deploy_timeout_minutes }}
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-      # Rough upload speed, measured on iwx41 (about 120 files a minute). Only used for estimates.
+      # Rough upload speed on iwx41: about 120 files a minute for the action and 0.5-0.6 s a file
+      # for the batch step (measured 2026-11-07). Only used for estimates.
       CRS_FILES_PER_SECOND: 2
       CRS_BYTES_PER_SECOND: 5242880
       # Changes estimated above this go through the resumable batch upload.
@@ -624,7 +625,7 @@ jobs:
 
       # FTP-Deploy-Action saves its sync state only at the end, so an upload that outlasts the job
       # keeps the old state and starts from zero on every run. This step sends a large change first,
-      # in batches, and saves the state on the server after each batch. New files go before
+      # over one FTP session, and saves the state on the server every 250 files. New files go before
       # replaced ones and nothing is deleted, so pages keep working during a partial upload. The
       # action then runs as usual: it finds the files already in place, deletes what is no longer
       # in the site and writes the final state.
@@ -645,10 +646,11 @@ jobs:
           DEPLOY_TIMEOUT: ${{ inputs.deploy_timeout_minutes }}
           STATE_NAME: .htcrservers-deploy-state.json
         run: |
-          import json, os, subprocess, sys, tempfile, time, urllib.parse
+          import ftplib, io, json, os, socket, ssl, sys, time
 
-          BATCH_FILES = 250
-          BATCH_BYTES = 256 * 1024 * 1024
+          # Progress is saved on the server after this many files (or bytes), and when the run stops.
+          SAVE_EVERY_FILES = 250
+          SAVE_EVERY_BYTES = 256 * 1024 * 1024
           MAX_TRIES = 3
           # Left for the action's final pass (hashing, deletes, final state) and the job summary.
           RESERVE_SECONDS = 600
@@ -661,7 +663,9 @@ jobs:
           clean_deploy = env["CLEAN_DEPLOY"] == "true"
           limit_minutes = int(env["DEPLOY_TIMEOUT"])
           deadline = int(env["CRS_JOB_STARTED"]) + limit_minutes * 60 - RESERVE_SECONDS
-          host = "ftps://" + env["FTP_HOST"] if env["FTP_PROTOCOL"] == "ftps-legacy" else "ftp://" + env["FTP_HOST"]
+          host, _, port = env["FTP_HOST"].partition(":")
+          port = int(port) if port.isdigit() else 21
+          timeout = min(max(30, int(env["FTP_TIMEOUT_MS"]) // 1000), 300)
 
 
           def say(line):
@@ -681,12 +685,107 @@ jobs:
               return max(1, round(seconds / 60))
 
 
-          def cfg_quote(value):
-              return '"' + value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t") + '"'
+          def tls_context():
+              context = ssl.create_default_context()
+              if env["FTP_SECURITY"] == "loose":
+                  context.check_hostname = False
+                  context.verify_mode = ssl.CERT_NONE
+              return context
 
 
-          def remote_url(name):
-              return host + "/" + urllib.parse.quote(remote_dir + name, safe="/")
+          class ImplicitTLS(ftplib.FTP_TLS):
+              """ftps-legacy: TLS from the first byte (port 990 style)."""
+
+              def connect(self, host="", port=0, timeout=-999, source_address=None):
+                  self.host, self.port, self.timeout = host, port, timeout
+                  sock = socket.create_connection((host, port), timeout)
+                  self.af = sock.family
+                  self.sock = self.context.wrap_socket(sock, server_hostname=host)
+                  self.file = self.sock.makefile("r", encoding=self.encoding)
+                  self.welcome = self.getresp()
+                  return self.welcome
+
+
+          class Server:
+              """One FTP session, reopened after a connection error. Python's ftplib keeps a single
+              control connection; curl 8.5 opened a new session for every file on iwx41 (about 2 s each)."""
+
+              def __init__(self, known_dirs):
+                  self.ftp = None
+                  self.dirs = set(known_dirs)
+
+              def session(self):
+                  if self.ftp is None:
+                      protocol = env["FTP_PROTOCOL"]
+                      if protocol == "ftps":
+                          ftp = ftplib.FTP_TLS(context=tls_context(), timeout=timeout)
+                      elif protocol == "ftps-legacy":
+                          ftp = ImplicitTLS(context=tls_context(), timeout=timeout)
+                      else:
+                          ftp = ftplib.FTP(timeout=timeout)
+                      ftp.connect(host, port, timeout)
+                      ftp.login(env["FTP_USER"], env["FTP_PASSWORD"])
+                      if protocol != "ftp":
+                          ftp.prot_p()
+                      ftp.voidcmd("TYPE I")  # once per session; ftplib's storbinary repeats it for every file
+                      self.ftp = ftp
+                  return self.ftp
+
+              def close(self):
+                  if self.ftp is not None:
+                      try:
+                          self.ftp.close()
+                      except Exception:
+                          pass
+                      self.ftp = None
+
+              def ensure_dir(self, path):
+                  parts = [p for p in path.split("/") if p]
+                  for depth in range(1, len(parts) + 1):
+                      folder = "/".join(parts[:depth])
+                      if folder in self.dirs:
+                          continue
+                      try:
+                          self.session().mkd(folder)
+                      except ftplib.error_perm:
+                          pass  # usually "exists"; a real refusal shows up on the upload
+                      self.dirs.add(folder)
+
+              def put(self, source, target):
+                  ftp = self.session()
+                  with open(source, "rb") as src, ftp.transfercmd("STOR " + target) as conn:
+                      while True:
+                          chunk = src.read(1024 * 1024)
+                          if not chunk:
+                              break
+                          conn.sendall(chunk)
+                      if isinstance(conn, ssl.SSLSocket):
+                          conn.unwrap()
+                  ftp.voidresp()
+
+              def get(self, target):
+                  """Returns the file's bytes, or None if it isn't on the server."""
+                  out = io.BytesIO()
+                  try:
+                      self.session().retrbinary("RETR " + target, out.write)
+                  except ftplib.error_perm as error:
+                      if str(error).startswith("550"):
+                          # A failed RETR can break the next data connection on iwx41; start fresh.
+                          self.close()
+                          return None
+                      raise
+                  return out.getvalue()
+
+
+          def run_safely(action, *args):
+              """Runs a server call; on a connection error, drops the session so the next call reopens it."""
+              try:
+                  return action(*args), None
+              except ftplib.error_perm as error:
+                  return None, error
+              except (ftplib.all_errors + (ValueError,)) as error:
+                  server.close()
+                  return None, error
 
 
           # The action's file list. Moved out of the upload folder, so it never lists itself.
@@ -694,183 +793,154 @@ jobs:
           if not os.path.exists(listing):
               say("::warning::Could not list the files for a large upload. The upload goes ahead the usual way, which can't resume if it outlasts the job.")
               sys.exit(0)
+          with open(listing, encoding="utf-8") as src:
+              local = json.load(src)
+          os.remove(listing)
 
-          with tempfile.TemporaryDirectory(dir=env["RUNNER_TEMP"]) as work:
-              os.chmod(work, 0o700)
-              with open(listing, encoding="utf-8") as src:
-                  local = json.load(src)
-              os.remove(listing)
+          # What is on the server now.
+          server = Server([])
+          raw, error = run_safely(server.get, remote_dir + state_name)
+          if error is not None:
+              say("::warning::Could not read the sync state (" + str(error)[:200] + "). The upload goes ahead the usual way, which can't resume if it outlasts the job.")
+              sys.exit(0)
+          state = {"description": local.get("description", ""), "version": local.get("version", "1.0.0"), "generatedTime": local.get("generatedTime", 0), "data": []}
+          if raw is not None:
+              # Like the action, treat a state it can't use as a first publish.
+              loaded = None
+              try:
+                  loaded = json.loads(raw.decode("utf-8"))
+              except ValueError:
+                  pass
+              if isinstance(loaded, dict) and isinstance(loaded.get("data"), list) and all(isinstance(i, dict) and "name" in i and "type" in i for i in loaded["data"]):
+                  state = loaded
+              else:
+                  say("::warning::The sync state on the server can't be read, so every file counts as changed.")
 
-              # Same settings as "Prepare sync state". Credentials stay out of the command line.
-              base_cfg = os.path.join(work, "base.cfg")
-              fd = os.open(base_cfg, os.O_WRONLY | os.O_CREAT, 0o600)
-              with os.fdopen(fd, "w", encoding="utf-8") as out:
-                  out.write("user = " + cfg_quote(env["FTP_USER"] + ":" + env["FTP_PASSWORD"]) + "\n")
-                  # fail-early: if the server goes away, don't wait out every remaining file in the batch.
-                  out.write("silent\nshow-error\ngloboff\nfail-early\nconnect-timeout = 30\nftp-create-dirs\n")
-                  out.write("speed-limit = 1\nspeed-time = " + str(max(30, int(env["FTP_TIMEOUT_MS"]) // 1000)) + "\n")
-                  if env["FTP_PROTOCOL"] == "ftps":
-                      out.write("ssl-reqd\n")
-                  if env["FTP_SECURITY"] == "loose":
-                      out.write("insecure\n")
+          # Same comparison as the action: new files, then files whose hash changed.
+          entries = {item["name"]: item for item in state["data"]}
+          local_items = {item["name"]: item for item in local["data"]}
+          files = [item for item in local["data"] if item["type"] == "file" and item["name"] != state_name]
+          new = [item for item in files if item["name"] not in entries]
+          replaced = [item for item in files if item["name"] in entries and entries[item["name"]]["type"] == "file" and entries[item["name"]].get("hash") != item["hash"]]
+          pending = new + replaced
+          if clean_deploy:
+              pending = files  # clean_deploy empties the folder first, so all of it uploads.
+          # Folders the state lists are on the server already: no MKD for them.
+          server.dirs.update(remote_dir.rstrip("/") + ("/" if remote_dir else "") + name for name, item in entries.items() if item["type"] == "folder")
+          server.dirs.add(remote_dir.rstrip("/"))
 
+          total = len(pending)
+          estimate = estimate_seconds(pending)
+          budget = deadline - time.time()
+          say(f"Changed: {total} of {len(files)} files. Estimated upload: about {minutes(estimate)} minutes. Job limit: {limit_minutes} minutes.")
+          too_long = estimate > max(budget, 0)
 
-              def curl(*args):
-                  return subprocess.run(["curl", "-K", base_cfg, *args], capture_output=True, text=True, errors="replace", check=False)
-
-
-              # What is on the server now. curl 78: no state yet. 9: the folder doesn't exist yet.
-              state_path = os.path.join(work, "state.json")
-              got = curl("-o", state_path, remote_url(state_name))
-              server = {"description": local.get("description", ""), "version": local.get("version", "1.0.0"), "generatedTime": local.get("generatedTime", 0), "data": []}
-              if got.returncode == 0:
-                  # Like the action, treat a state it can't use as a first publish.
-                  loaded = None
-                  try:
-                      with open(state_path, encoding="utf-8") as src:
-                          loaded = json.load(src)
-                  except ValueError:
-                      pass
-                  if isinstance(loaded, dict) and isinstance(loaded.get("data"), list) and all(isinstance(i, dict) and "name" in i and "type" in i for i in loaded["data"]):
-                      server = loaded
-                  else:
-                      say("::warning::The sync state on the server can't be read, so every file counts as changed.")
-              elif got.returncode not in (78, 9):
-                  say("::warning::Could not read the sync state (curl exit " + str(got.returncode) + ": " + got.stderr[:200].strip() + "). The upload goes ahead the usual way, which can't resume if it outlasts the job.")
-                  sys.exit(0)
-
-              # Same comparison as the action: new files, then files whose hash changed.
-              entries = {item["name"]: item for item in server["data"]}
-              local_items = {item["name"]: item for item in local["data"]}
-              files = [item for item in local["data"] if item["type"] == "file" and item["name"] != state_name]
-              new = [item for item in files if item["name"] not in entries]
-              replaced = [item for item in files if item["name"] in entries and entries[item["name"]]["type"] == "file" and entries[item["name"]].get("hash") != item["hash"]]
-              pending = new + replaced
-              if clean_deploy:
-                  pending = files  # clean_deploy empties the folder first, so all of it uploads.
-
-              total = len(pending)
-              estimate = estimate_seconds(pending)
-              budget = deadline - time.time()
-              say(f"Changed: {total} of {len(files)} files. Estimated upload: about {minutes(estimate)} minutes. Job limit: {limit_minutes} minutes.")
-              too_long = estimate > max(budget, 0)
-
-              if clean_deploy:
-                  # A clean deploy deletes the state with everything else, so it can't be split up.
-                  if too_long:
-                      say(f"::warning::clean_deploy needs to upload {total} files (about {minutes(estimate)} minutes) but the job stops at {limit_minutes} minutes. It can't resume: the site stays partly uploaded and a re-run starts over. Raise deploy_timeout_minutes or deploy without clean_deploy.")
-                      summary(f"### Large upload: won't fit the job limit", f"clean_deploy needs about {minutes(estimate)} minutes for {total} files; the limit is {limit_minutes} minutes and it can't resume. Raise `deploy_timeout_minutes`.")
-                  sys.exit(0)
-
+          if clean_deploy:
+              # A clean deploy deletes the state with everything else, so it can't be split up.
               if too_long:
-                  warning = f"{total} changed files need about {minutes(estimate)} minutes; the upload has about {minutes(max(budget, 0))} of this job's {limit_minutes} minutes."
-                  advice = "It will stop before the limit and save its progress. Re-run the failed job to continue, or raise deploy_timeout_minutes to finish in one run."
-                  say("::warning::" + warning + " " + advice)
-                  summary("### Large upload: won't fit in one run", warning, advice)
+                  say(f"::warning::clean_deploy needs to upload {total} files (about {minutes(estimate)} minutes) but the job stops at {limit_minutes} minutes. It can't resume: the site stays partly uploaded and a re-run starts over. Raise deploy_timeout_minutes or deploy without clean_deploy.")
+                  summary("### Large upload: won't fit the job limit", f"clean_deploy needs about {minutes(estimate)} minutes for {total} files; the limit is {limit_minutes} minutes and it can't resume. Raise `deploy_timeout_minutes`.")
+              sys.exit(0)
 
-              if dry_run:
-                  summary(f"### Dry run: {total} of {len(files)} files would upload (about {minutes(estimate)} minutes; job limit {limit_minutes} minutes)")
-                  sys.exit(0)
+          if too_long:
+              warning = f"{total} changed files need about {minutes(estimate)} minutes; the upload has about {minutes(max(budget, 0))} of this job's {limit_minutes} minutes."
+              advice = "It will stop before the limit and save its progress. Re-run the failed job to continue, or raise deploy_timeout_minutes to finish in one run."
+              say("::warning::" + warning + " " + advice)
+              summary("### Large upload: won't fit in one run", warning, advice)
 
-              if estimate <= int(env["CRS_BATCH_ABOVE_SECONDS"]) and not too_long:
-                  say("Small enough for the usual upload.")
-                  sys.exit(0)
+          if dry_run:
+              summary(f"### Dry run: {total} of {len(files)} files would upload (about {minutes(estimate)} minutes; job limit {limit_minutes} minutes)")
+              sys.exit(0)
 
-
-              def save_state():
-                  """Write the state under a temporary name and rename it: a cut-off upload must not
-                  leave a truncated state on the server, which would make every file count as new."""
-                  server["data"] = sorted(entries.values(), key=lambda item: item["name"])
-                  with open(state_path, "w", encoding="utf-8") as out:
-                      json.dump(server, out)
-                  temp_name = state_name + ".tmp"
-                  sent = curl("-T", state_path, remote_url(temp_name))
-                  if sent.returncode == 0:
-                      moved = curl("-o", os.devnull, "-Q", "RNFR " + remote_dir + temp_name, "-Q", "RNTO " + remote_dir + state_name, host + "/")
-                      if moved.returncode == 0:
-                          return True
-                  # The server refused the rename: overwrite directly.
-                  sent = curl("-T", state_path, remote_url(state_name))
-                  if sent.returncode != 0:
-                      say("::warning::Could not save progress (" + sent.stderr[:200].strip() + "). Trying again after the next batch.")
-                  return sent.returncode == 0
+          if estimate <= int(env["CRS_BATCH_ABOVE_SECONDS"]) and not too_long:
+              say("Small enough for the usual upload.")
+              sys.exit(0)
 
 
-              def upload(batch):
-                  """Send a batch over one connection. Returns the items that did not arrive, first the one
-                  that failed, then the ones curl did not try after it."""
-                  cfg = os.path.join(work, "batch.cfg")
-                  with open(cfg, "w", encoding="utf-8") as out:
-                      out.write('write-out = "%{urlnum} %{exitcode}\\n"\n')
-                      for item in batch:
-                          out.write("url = " + cfg_quote(remote_url(item["name"])) + "\n")
-                          out.write("upload-file = " + cfg_quote(os.path.abspath(local_dir + item["name"])) + "\n")
-                  done = curl("-K", cfg)
-                  arrived = set()
-                  for line in done.stdout.splitlines():
-                      num, _, code = line.partition(" ")
-                      if code == "0":
-                          arrived.add(int(num))
-                  if len(arrived) < len(batch) and done.stderr.strip():
-                      say("curl: " + done.stderr.strip()[:500])
-                  return [item for index, item in enumerate(batch) if index not in arrived]
+          def write_state():
+              """Write the state under a temporary name and rename it: a cut-off upload must not
+              leave a truncated state on the server, which would make every file count as new."""
+              state["data"] = sorted(entries.values(), key=lambda item: item["name"])
+              path = os.path.join(env["RUNNER_TEMP"], "crs-batch-state.json")
+              with open(path, "w", encoding="utf-8") as out:
+                  json.dump(state, out)
+              target = remote_dir + state_name
+              _, error = run_safely(server.put, path, target + ".tmp")
+              if error is None:
+                  _, error = run_safely(lambda: server.session().rename(target + ".tmp", target))
+                  if error is None:
+                      return True
+              # The server refused the rename (or the session dropped): overwrite directly.
+              _, error = run_safely(server.put, path, target)
+              if error is not None:
+                  say("::warning::Could not save progress (" + str(error)[:200] + "). Trying again after the next files.")
+              return error is None
 
 
-              def finish_unfinished(reason):
-                  left = len(pending)
-                  if saved or save_state():
-                      resume = "Progress is saved: re-run the failed job and it continues from there."
-                  else:
-                      resume = "The latest progress could not be saved: re-run the failed job and it continues from the last saved batch, so some files are sent again."
-                  say(f"::error::The upload did not finish: {reason} {total - left} of {total} changed files were sent. {resume}")
-                  summary(
-                      "### Upload did not finish",
-                      f"{reason} {total - left} of {total} changed files were sent; {left} are still the old version or missing on the server. Files that left the site have not been deleted.",
-                      "",
-                      f"{resume} Raise `deploy_timeout_minutes` to finish a change this size in one run.",
-                  )
-                  sys.exit(1)
+          saved = True
 
 
-              tries = {}
-              started = time.time()
-              saved = True
-              while pending:
-                  if time.time() >= deadline:
-                      finish_unfinished(f"it stopped before the job's {limit_minutes}-minute limit.")
-                  batch, batch_bytes = [], 0
-                  while pending and len(batch) < BATCH_FILES and (not batch or batch_bytes + pending[0]["size"] <= BATCH_BYTES):
-                      batch.append(pending.pop(0))
-                      batch_bytes += batch[-1]["size"]
-                  failed = upload(batch)
-                  failed_names = {item["name"] for item in failed}
-                  for item in batch:
-                      if item["name"] in failed_names:
-                          continue
-                      entries[item["name"]] = item
-                      # curl created the parent folders; record them so the action doesn't redo each one.
-                      parent = item["name"].rpartition("/")[0]
-                      while parent and parent not in entries:
-                          entries[parent] = local_items.get(parent, {"type": "folder", "name": parent})
-                          parent = parent.rpartition("/")[0]
-                  saved = save_state()
-                  sent = total - len(pending) - len(failed)
+          def finish_unfinished(reason):
+              left = len(pending)
+              if saved or write_state():
+                  resume = "Progress is saved: re-run the failed job and it continues from there."
+              else:
+                  resume = "The latest progress could not be saved: re-run the failed job and it continues from the last saved point, so some files are sent again."
+              say(f"::error::The upload did not finish: {reason} {total - left} of {total} changed files were sent. {resume}")
+              summary(
+                  "### Upload did not finish",
+                  f"{reason} {total - left} of {total} changed files were sent; {left} are still the old version or missing on the server. Files that left the site have not been deleted.",
+                  "",
+                  f"{resume} Raise `deploy_timeout_minutes` to finish a change this size in one run.",
+              )
+              sys.exit(1)
+
+
+          tries = {}
+          started = time.time()
+          since_files = since_bytes = 0
+          while pending:
+              if time.time() >= deadline:
+                  finish_unfinished(f"it stopped before the job's {limit_minutes}-minute limit.")
+              item = pending[0]
+              name = item["name"]
+              target = remote_dir + name
+              parent = target.rpartition("/")[0]
+              _, error = run_safely(server.ensure_dir, parent) if parent else (None, None)
+              if error is None:
+                  _, error = run_safely(server.put, os.path.abspath(local_dir + name), target)
+              if error is not None:
+                  tries[name] = tries.get(name, 0) + 1
+                  say(f"{name}: {str(error)[:300]}")
+                  if tries[name] >= MAX_TRIES:
+                      finish_unfinished(f"{name} failed {MAX_TRIES} times.")
+                  time.sleep(20)
+                  continue
+              pending.pop(0)
+              entries[name] = item
+              # Record the parent folders so the action doesn't create each one again.
+              folder = name.rpartition("/")[0]
+              while folder and folder not in entries:
+                  entries[folder] = local_items.get(folder, {"type": "folder", "name": folder})
+                  folder = folder.rpartition("/")[0]
+              saved = False
+              since_files += 1
+              since_bytes += item["size"]
+              if since_files >= SAVE_EVERY_FILES or since_bytes >= SAVE_EVERY_BYTES:
+                  saved = write_state()
+                  since_files = since_bytes = 0
+                  sent = total - len(pending)
                   rate = sent / max(time.time() - started, 1) * 60
                   say(f"Uploaded {sent} of {total} files ({rate:.0f} files a minute).")
-                  if failed:
-                      pending[:0] = failed
-                      culprit = failed[0]["name"]
-                      tries[culprit] = tries.get(culprit, 0) + 1
-                      if tries[culprit] >= MAX_TRIES:
-                          finish_unfinished(f"{culprit} failed {MAX_TRIES} times.")
-                      time.sleep(20)
 
-              if not saved and not save_state():
-                  finish_unfinished("the last progress could not be saved.")
-              say(f"All {total} changed files are on the server.")
-              with open(env["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
-                  out.write("sent=true\n")
-              summary(f"### Large upload: {total} files sent in batches, progress saved after each batch")
+          if not saved and not write_state():
+              finish_unfinished("the last progress could not be saved.")
+          server.close()
+          rate = total / max(time.time() - started, 1) * 60
+          say(f"All {total} changed files are on the server ({rate:.0f} files a minute).")
+          with open(env["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              out.write("sent=true\n")
+          summary(f"### Large upload: {total} files sent, progress saved every {SAVE_EVERY_FILES} files")
 
       # One retry: a single failed TLS data connection (seen once in ~1000 uploads on iwx41)
       # otherwise fails the whole deploy. FTP-Deploy-Action saves its sync state only at the
@@ -956,7 +1026,7 @@ jobs:
               echo "## Upload did not finish"
               echo "The job was cancelled, or reached its limit of ${DEPLOY_TIMEOUT} minutes, during the upload. The server now has a mix of old and new files."
               if [ "$BATCHES_OUTCOME" = "cancelled" ]; then
-                echo "Progress was saved after each batch, so a re-run continues from the last saved batch."
+                echo "Progress was saved every 250 files, so a re-run continues from the last save."
               elif [ "$BATCHES_SENT" = "true" ]; then
                 echo "All changed files were already sent and saved in batches, so a re-run only has to delete what left the site and write the final state."
               else
