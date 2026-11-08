@@ -829,6 +829,18 @@ jobs:
           server.dirs.update(remote_dir.rstrip("/") + ("/" if remote_dir else "") + name for name, item in entries.items() if item["type"] == "folder")
           server.dirs.add(remote_dir.rstrip("/"))
 
+          # Each file takes about 5-10 round trips, so the upload speed follows the distance between
+          # GitHub's runner and the server. Logged to explain a slow run.
+          def round_trip():
+              ftp = server.session()
+              begin = time.time()
+              for _ in range(3):
+                  ftp.voidcmd("NOOP")
+              return (time.time() - begin) / 3
+          rtt, error = run_safely(round_trip)
+          if error is None:
+              say(f"Server round trip: {rtt * 1000:.0f} ms.")
+
           total = len(pending)
           estimate = estimate_seconds(pending)
           budget = deadline - time.time()
